@@ -15,6 +15,7 @@ import 'platform/activity_relaunch.dart';
 import 'state/app_state.dart';
 import 'state/clock_format.dart';
 import 'state/locale_controller.dart';
+import 'opgg/opgg_shell.dart';
 import 'state/prefs.dart';
 import 'state/units_controller.dart';
 import 'telemetry/telemetry_service.dart';
@@ -695,6 +696,8 @@ class _ShellState extends State<AppMainShell> implements GuideShellLink {
     // SELECT, not watch: a bool that flips twice a workout, not the ~1 Hz
     // AppState tick.
     final live = context.select<AppState, bool>((a) => a.activeWorkout != null);
+    // OPGG: Jonas' own UI on the OpenStrap engine (pref lets the old shell back in).
+    if (Prefs.getBool('opgg_ui', true)) return const OpggShell();
     return AppShell(
       initial: _domain,
       selection: _selection,

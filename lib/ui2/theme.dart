@@ -135,24 +135,25 @@ class P {
 
   static P of(BuildContext c) => P(Theme.of(c).brightness == Brightness.dark);
 
-  Color get bg => dark ? const Color(0xFF0B1017) : C.n50;
-  Color get card => dark ? const Color(0xFF151C26) : C.white;
-  Color get card2 => dark ? const Color(0xFF1D2632) : C.n100;
-  Color get line => dark ? const Color(0xFF232D3B) : C.n200;
-  Color get track => dark ? const Color(0xFF232D3B) : C.n200;
+  // OPGG: neutral dark grey instead of navy (same roles, same contrast rules).
+  Color get bg => dark ? const Color(0xFF1D1D20) : C.n50;
+  Color get card => dark ? const Color(0xFF27272A) : C.white;
+  Color get card2 => dark ? const Color(0xFF2E2E32) : C.n100;
+  Color get line => dark ? const Color(0xFF36363A) : C.n200;
+  Color get track => dark ? const Color(0xFF36363A) : C.n200;
 
   /// The colour an elevated surface casts. Black in the dark theme: a navy
   /// shadow is lighter than the dark page and reads as a glow, not a shadow.
   Color get shadow => dark ? const Color(0xFF000000) : C.n900;
 
-  Color get ink => dark ? const Color(0xFFF1F5F9) : C.n900;
-  Color get ink2 => dark ? const Color(0xFF94A3B8) : C.n600;
+  Color get ink => dark ? const Color(0xFFF4F4F5) : C.n900;
+  Color get ink2 => dark ? const Color(0xFFA1A1A6) : C.n600;
 
   /// The muted caption ink. Hand-solved to clear 4.5:1 on [card2], the darkest
   /// (light theme) / lightest (dark theme) surface it can sit on — so it is
   /// legible on every surface, not just the one it was eyeballed against.
   /// The values it replaces measured 4.34:1 and 3.21:1 respectively.
-  Color get ink3 => dark ? const Color(0xFF7F8DA0) : const Color(0xFF627188);
+  Color get ink3 => dark ? const Color(0xFF9A9AA0) : const Color(0xFF627188);
 
   /// The ink that goes on top of a [fill]. White by construction — [fill]
   /// darkens the accent until white clears AA on it.

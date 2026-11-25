@@ -1,0 +1,63 @@
+name: ios-build (OPGG)
+
+# Builds an unsigned .ipa for Sideloadly. Runs on every push to main and
+# can be started by hand from the Actions tab ("Run workflow").
+on:
+  push:
+    branches: [main, 'opgg/**']
+  workflow_dispatch:
+
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios:
+    # Same image upstream uses (Xcode 27.x). If GitHub does not hand it out
+    # to this repo, switch to macos-latest.
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          x=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$x/Contents/Developer"
+          xcodebuild -version
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'   # same pin as upstream
+
+      # No backend, no health-data upload, no Firebase secrets: this build is
+      # for one person and talks only to the band and (later) Notion.
+      - name: Write .env
+        run: |
+          echo "COMPANION_URL=" > .env
+          echo "BACKEND_URL=" >> .env
+          echo "ENABLE_HEALTH_DATA_CONTRIBUTION=false" >> .env
+
+      - name: Install flutterfire (Crashlytics build phase expects it)
+        run: dart pub global activate flutterfire_cli 1.4.0
+
+      - run: flutter pub get
+
+      - name: Build unsigned iOS app
+        run: flutter build ios --release --no-codesign --dart-define-from-file=.env
+
+      - name: Strip Watch companion (breaks free-account resigning)
+        run: rm -rf "build/ios/iphoneos/Runner.app/Watch"
+
+      - name: Package unsigned IPA
+        run: |
+          cd build/ios/iphoneos
+          mkdir -p Payload
+          cp -R Runner.app Payload/Runner.app
+          zip -qr OPGG-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OPGG-ipa
+          path: build/ios/iphoneos/OPGG-unsigned.ipa
+          retention-days: 14

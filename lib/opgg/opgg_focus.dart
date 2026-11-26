@@ -673,7 +673,7 @@ class _FocusTodayState extends State<FocusToday> {
       final n = NotionStore.instance;
       final before = n.tasks.where((t) => t.id == s.taskId).firstOrNull?.progress;
       final changed = s.taskId != null && progress != null && progress != before;
-      if (changed) n.setProgress(s.taskId!, progress!);
+      if (changed) n.setProgress(s.taskId!, progress);
       setState(() => _note = changed
           ? 'Fortschritt gespeichert · Session unter 1 Minute'
           : 'Unter 1 Minute – nicht gespeichert');

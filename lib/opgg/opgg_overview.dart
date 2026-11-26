@@ -12,6 +12,8 @@ import '../state/app_state.dart';
 import 'opgg_charts.dart';
 import 'opgg_data.dart';
 import 'opgg_style.dart';
+import 'opgg_sync.dart';
+import 'opgg_tasks.dart';
 
 /// What the Today bundle says, or — while it still withholds last night
 /// (it waits about an hour past wake) — the value the derive already stored
@@ -59,7 +61,9 @@ String _pct(double? v) => v == null ? '—' : '${v.round()}';
 
 class OverviewToday extends StatefulWidget {
   final OpggDay day;
-  const OverviewToday({super.key, required this.day});
+  final void Function(OTask) onStart;
+  final VoidCallback onTasks;
+  const OverviewToday({super.key, required this.day, required this.onStart, required this.onTasks});
   @override
   State<OverviewToday> createState() => _OverviewTodayState();
 }
@@ -81,7 +85,6 @@ class _OverviewTodayState extends State<OverviewToday> {
     final resp = pick(t.resp?.value, d, 'resp_rate');
     final stress = pick(t.stress?.score, d, 'stress');
     final skin = pick(t.skinTempIdx, d, 'skin_temp_z');
-    final night = d.recent('sleep')?.day ?? d.recent('hrv')?.day;
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
@@ -149,7 +152,6 @@ class _OverviewTodayState extends State<OverviewToday> {
         ),
         const SizedBox(height: 22),
         SectionHead('Biomarker',
-            hint: night == null ? null : nightLabel(night),
             trailing: Row(mainAxisSize: MainAxisSize.min, children: [
               Dot(hr != null ? O.green : (app.isPaired ? O.orange : O.red)),
               const SizedBox(width: 6),
@@ -174,14 +176,47 @@ class _OverviewTodayState extends State<OverviewToday> {
           ],
         ),
         const SizedBox(height: 22),
-        const SectionHead('Aufgaben', hint: 'ab Etappe 2'),
-        const SizedBox(height: 10),
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: tileDeco(),
-          child: const Text(
-              'Hier erscheinen die Notion-Aufgaben, die zu deiner Energie heute passen.',
-              style: O.small),
+        ListenableBuilder(
+          listenable: NotionStore.instance,
+          builder: (context, _) {
+            final n = NotionStore.instance;
+            final top = suggest(n.tasks, e.total).take(3).toList();
+            final want = wantedLevel(e.total);
+            return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              SectionHead('Passt zu heute',
+                  hint: !n.configured
+                      ? null
+                      : want == null
+                          ? 'nach Fälligkeit'
+                          : 'Energie $want',
+                  trailing: n.configured
+                      ? GestureDetector(
+                          onTap: widget.onTasks,
+                          child: const Text('alle', style: O.small),
+                        )
+                      : null),
+              const SizedBox(height: 10),
+              Container(
+                decoration: tileDeco(),
+                child: !n.configured || top.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Text(
+                            !n.configured
+                                ? 'Notion verbinden, dann erscheinen hier passende Aufgaben.'
+                                : 'Keine offenen Aufgaben.',
+                            style: O.small),
+                      )
+                    : Column(children: [
+                        for (var i = 0; i < top.length; i++) ...[
+                          if (i > 0)
+                            const Divider(height: 1, thickness: 1, color: O.line, indent: 14),
+                          TaskRow(top[i], onTap: () => widget.onStart(top[i])),
+                        ],
+                      ]),
+              ),
+            ]);
+          },
         ),
       ],
     );

@@ -18,6 +18,7 @@ import '../state/app_state.dart';
 import '../state/prefs.dart';
 import 'opgg_charts.dart';
 import 'opgg_style.dart';
+import 'opgg_sync.dart' show NotionStore;
 
 // ── model ────────────────────────────────────────────────────────────────────
 
@@ -74,7 +75,7 @@ class FocusSession {
     );
   }
 
-  String get label => title ?? (type == 'learn' ? 'Lernen' : 'Arbeit');
+  String get label => title ?? 'Fokus';
 }
 
 /// Process-wide focus state (one running session at most).
@@ -169,6 +170,24 @@ class FocusStore extends ChangeNotifier {
   int get curBreak => phase == FPhase.paused && pauseStart != null ? _now - pauseStart! : 0;
   int get sinceResume => phase == FPhase.running ? _now - lastResume : 0;
 
+  /// Starts a session linked to a Notion task. False when one is running.
+  bool startTask(String id, String title) {
+    if (phase != FPhase.idle) return false;
+    taskId = id;
+    taskTitle = title;
+    primary();
+    return true;
+  }
+
+  /// Name a free (not task-linked) session; empty clears it.
+  void setTitle(String t) {
+    if (taskId != null) return;
+    final v = t.trim();
+    taskTitle = v.isEmpty ? null : v;
+    _saveRun();
+    notifyListeners();
+  }
+
   void setType(String t) {
     if (phase != FPhase.idle) return; // a running session keeps its type
     type = t;
@@ -195,12 +214,12 @@ class FocusStore extends ChangeNotifier {
   }
 
   static int autoBlock(double? energy) => energy == null
-      ? 50
+      ? 45
       : energy >= 70
-          ? 50
+          ? 60
           : energy >= 45
-              ? 40
-              : 25;
+              ? 45
+              : 30;
 
   double? energy; // set by the screen from today's triangle
 
@@ -406,13 +425,6 @@ class _FocusTodayState extends State<FocusToday> {
           ListView(
             padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
             children: [
-              Seg(
-                labels: const ['Lernen', 'Arbeit'],
-                index: f.type == 'learn' ? 0 : 1,
-                onPick: f.phase == FPhase.idle ? (i) => f.setType(i == 0 ? 'learn' : 'work') : (_) {},
-                height: 34,
-              ),
-              const SizedBox(height: 14),
               if (f.reminderDue) ...[
                 _Nudge(
                   text: '${_dur(since)} am Stück${f.taskTitle == null ? '' : ' · ${f.taskTitle}'}',
@@ -437,7 +449,7 @@ class _FocusTodayState extends State<FocusToday> {
                     const SizedBox(width: 7),
                     Text(
                         switch (f.phase) {
-                          FPhase.running => f.type == 'learn' ? 'Lernen' : 'Arbeiten',
+                          FPhase.running => 'Fokus',
                           FPhase.paused => 'Pause',
                           FPhase.idle => 'Bereit',
                         },
@@ -463,10 +475,15 @@ class _FocusTodayState extends State<FocusToday> {
                       ),
                     ),
                   ]),
-                  if (f.taskTitle != null) ...[
-                    const SizedBox(height: 10),
-                    Text(f.taskTitle!, style: O.body.copyWith(color: O.ink2)),
-                  ],
+                  const SizedBox(height: 10),
+                  GestureDetector(
+                    onTap: f.taskId != null ? null : () => _rename(context),
+                    child: Text(
+                        f.taskTitle ?? 'Titel hinzufügen',
+                        style: f.taskTitle == null
+                            ? O.small
+                            : O.body.copyWith(color: O.ink2)),
+                  ),
                   const SizedBox(height: 18),
                   Text(_clock(f.studied),
                       style: TextStyle(
@@ -487,7 +504,7 @@ class _FocusTodayState extends State<FocusToday> {
               Row(children: [
                 Expanded(
                     child: _Mini('Pausen',
-                        '${f.breaks} · ${_clock(f.breakMs + f.curBreak)}')),
+                        '${f.breaks} · ${_dur(f.breakMs + f.curBreak)}')),
                 const SizedBox(width: 8),
                 Expanded(
                     child: _Mini('Puls jetzt', hr == null ? '–' : '$hr bpm',
@@ -571,9 +588,10 @@ class _FocusTodayState extends State<FocusToday> {
                         for (final o in [
                           (-1, 'Automatisch',
                               '${FocusStore.autoBlock(widget.energy)} min · ${widget.energy == null ? 'Standard' : 'nach Energie'}'),
-                          (25, '25 min', 'kurze Blöcke'),
-                          (50, '50 min', 'klassisch'),
-                          (90, '90 min', 'Deep Work'),
+                          (15, '15 min', 'sehr kurz'),
+                          (30, '30 min', 'kurze Blöcke'),
+                          (45, '45 min', 'mittel'),
+                          (60, '60 min', 'lange Blöcke'),
                           (0, 'Aus', 'keine Erinnerung'),
                         ])
                           InkWell(
@@ -608,6 +626,36 @@ class _FocusTodayState extends State<FocusToday> {
     );
   }
 
+  Future<void> _rename(BuildContext context) async {
+    final c = TextEditingController(text: f.taskTitle ?? '');
+    final t = await showDialog<String>(
+      context: context,
+      builder: (d) => AlertDialog(
+        backgroundColor: O.tile,
+        title: const Text('Woran arbeitest du?', style: TextStyle(fontSize: 16, color: O.ink)),
+        content: TextField(
+          controller: c,
+          autofocus: true,
+          style: const TextStyle(color: O.ink),
+          cursorColor: O.ink,
+          decoration: const InputDecoration(
+              hintText: 'z. B. Entwerfen I', hintStyle: TextStyle(color: O.ink3)),
+          onSubmitted: (v) => Navigator.of(d).pop(v),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(d).pop(),
+              child: const Text('Abbrechen', style: TextStyle(color: O.ink3))),
+          TextButton(
+              onPressed: () => Navigator.of(d).pop(c.text),
+              child: const Text('OK', style: TextStyle(color: O.ink))),
+        ],
+      ),
+    );
+    c.dispose();
+    if (t != null) f.setTitle(t);
+  }
+
   Future<void> _finish(BuildContext context) async {
     HapticFeedback.mediumImpact();
     // A linked task asks for its progress first (tasks arrive with Notion).
@@ -617,6 +665,7 @@ class _FocusTodayState extends State<FocusToday> {
       if (progress == null) return; // sheet dismissed: keep running
     }
     final s = f.finish(progress: progress);
+    if (s != null && s.studiedMs >= 60000) NotionStore.instance.enqueueSession(s);
     if (s != null && s.studiedMs < 60000 && mounted) {
       setState(() => _note = 'Unter 1 Minute – nicht gespeichert');
       _noteT?.cancel();
@@ -742,7 +791,7 @@ class _SessionRow extends StatelessWidget {
             Text(s.label, style: O.body),
             const SizedBox(height: 2),
             Text(
-                '${s.type == 'learn' ? 'Lernen' : 'Arbeit'} · ${hhmm(a)} – ${hhmm(b)}'
+                '${hhmm(a)} – ${hhmm(b)}'
                 '${s.progress == null ? '' : ' · ${s.progress} %'}',
                 style: O.small),
           ]),
@@ -788,7 +837,6 @@ class FocusPeriod extends StatelessWidget {
             ];
         final all = hours(null);
         final total = all.whereType<double>().fold<double>(0, (a, b) => a + b);
-        final learn = hours('learn').whereType<double>().fold<double>(0, (a, b) => a + b);
         final sessions = [for (final d in days) ...f.onDay(d)];
         final avgLen = sessions.isEmpty
             ? null
@@ -802,8 +850,7 @@ class FocusPeriod extends StatelessWidget {
             Row(children: [
               Expanded(
                   child: SumTile('Fokuszeit', sessions.isEmpty ? '--' : de(total, 1),
-                      sessions.isEmpty ? 'h' : 'h · davon ${de(learn, 1)} h Lernen',
-                      bar: sessions.isEmpty || total == 0 ? null : learn / total,
+                      sessions.isEmpty ? 'h' : 'h fokussiert',
                       height: 118)),
               const SizedBox(width: 8),
               Expanded(
@@ -817,12 +864,6 @@ class FocusPeriod extends StatelessWidget {
                 days: days,
                 values: all,
                 emptyNote: 'noch keine Sessions'),
-            const SizedBox(height: 12),
-            TrendCard(
-                spec: const TrendSpec('learn', 'Lernen', 'h', dec: 1),
-                days: days,
-                values: hours('learn'),
-                emptyNote: 'noch keine Lern-Sessions'),
           ],
         );
       },

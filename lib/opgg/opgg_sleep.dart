@@ -2,8 +2,10 @@
 // The alarm goes through AppState.setAlarm (band vibration); its state comes
 // from alarmArmOf so this screen and the engine can never disagree.
 
-import 'package:flutter/cupertino.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../state/app_state.dart';
@@ -128,7 +130,7 @@ class _Night extends StatelessWidget {
   Widget _kv(String k, String v, Color? c) => Expanded(
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            if (c != null) ...[Dot(c, size: 6), const SizedBox(width: 5)],
+            if (c != null) ...[Dot(c, size: 6, blink: false), const SizedBox(width: 5)],
             Text(k, style: const TextStyle(fontSize: 11, color: O.ink3)),
           ]),
           const SizedBox(height: 2),
@@ -210,30 +212,35 @@ class _AlarmState extends State<_Alarm> {
         padding: const EdgeInsets.fromLTRB(8, 6, 8, 14),
         decoration: wellDeco(),
         child: Column(children: [
-          // The time itself is the picker.
-          SizedBox(
-            height: 150,
-            child: CupertinoTheme(
-              data: const CupertinoThemeData(
-                brightness: Brightness.dark,
-                textTheme: CupertinoTextThemeData(
-                  dateTimePickerTextStyle:
-                      TextStyle(fontSize: 34, fontWeight: FontWeight.w300, color: O.ink),
-                ),
+          // The time itself is the picker: arrows step it, dragging the
+          // digits up or down scrolls through the values.
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              _TimeUnit(
+                  value: h,
+                  max: 24,
+                  step: 1,
+                  onChanged: (v) => setState(() {
+                        _h = v;
+                        _m = m;
+                        _err = null;
+                      })),
+              const Padding(
+                padding: EdgeInsets.only(bottom: 6),
+                child: Text(':',
+                    style: TextStyle(fontSize: 56, fontWeight: FontWeight.w200, color: O.ink3)),
               ),
-              child: CupertinoDatePicker(
-                key: ValueKey(_h == null ? 'saved-$h:$m' : 'edit'),
-                mode: CupertinoDatePickerMode.time,
-                use24hFormat: true,
-                itemExtent: 44,
-                initialDateTime: DateTime(2000, 1, 1, h, m),
-                onDateTimeChanged: (d) => setState(() {
-                  _h = d.hour;
-                  _m = d.minute;
-                  _err = null;
-                }),
-              ),
-            ),
+              _TimeUnit(
+                  value: m,
+                  max: 60,
+                  step: 5,
+                  onChanged: (v) => setState(() {
+                        _h = h;
+                        _m = v;
+                        _err = null;
+                      })),
+            ]),
           ),
           const SizedBox(height: 6),
           Row(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -378,6 +385,88 @@ class _AlarmState extends State<_Alarm> {
       if (mounted) setState(() => _busy = false);
     }
   }
+}
+
+/// One time digit pair with up/down arrows (tap = [step], hold = repeat)
+/// and vertical drag (1 per notch) — wraps around at [max].
+class _TimeUnit extends StatefulWidget {
+  final int value, max, step;
+  final ValueChanged<int> onChanged;
+  const _TimeUnit(
+      {required this.value, required this.max, required this.step, required this.onChanged});
+  @override
+  State<_TimeUnit> createState() => _TimeUnitState();
+}
+
+class _TimeUnitState extends State<_TimeUnit> {
+  Timer? _rep;
+  double _drag = 0;
+  late int _v = widget.value;
+
+  @override
+  void didUpdateWidget(_TimeUnit old) {
+    super.didUpdateWidget(old);
+    _v = widget.value;
+  }
+
+  @override
+  void dispose() {
+    _rep?.cancel();
+    super.dispose();
+  }
+
+  void _by(int d) {
+    _v = ((_v + d) % widget.max + widget.max) % widget.max;
+    HapticFeedback.selectionClick();
+    widget.onChanged(_v);
+  }
+
+  /// Arrow step: snaps to the step grid first (07:03 + 5 → 07:05).
+  void _arrow(int dir) {
+    final s = widget.step;
+    final r = _v % s;
+    _by(dir > 0 ? s - r : (r == 0 ? -s : -r));
+  }
+
+  Widget _btn(IconData icon, int dir) => GestureDetector(
+        onTap: () => _arrow(dir),
+        onLongPressStart: (_) =>
+            _rep = Timer.periodic(const Duration(milliseconds: 110), (_) => _arrow(dir)),
+        onLongPressEnd: (_) => _rep?.cancel(),
+        child: SizedBox(
+            width: 96, height: 34, child: Icon(icon, size: 26, color: O.ink3)),
+      );
+
+  @override
+  Widget build(BuildContext context) => Column(mainAxisSize: MainAxisSize.min, children: [
+        _btn(Icons.keyboard_arrow_up_rounded, 1),
+        GestureDetector(
+          onVerticalDragUpdate: (d) {
+            _drag += d.delta.dy;
+            while (_drag <= -14) {
+              _drag += 14;
+              _by(1);
+            }
+            while (_drag >= 14) {
+              _drag -= 14;
+              _by(-1);
+            }
+          },
+          onVerticalDragEnd: (_) => _drag = 0,
+          child: SizedBox(
+            width: 96,
+            child: Text(pad2(_v),
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                    fontSize: 60,
+                    fontWeight: FontWeight.w200,
+                    height: 1.1,
+                    color: O.ink,
+                    fontFeatures: O.tabular)),
+          ),
+        ),
+        _btn(Icons.keyboard_arrow_down_rounded, -1),
+      ]);
 }
 
 // ── Wind-down ────────────────────────────────────────────────────────────────

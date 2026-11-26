@@ -45,15 +45,58 @@ BoxDecoration tileDeco({double r = 16}) =>
     BoxDecoration(color: O.tile, borderRadius: BorderRadius.circular(r));
 
 /// A small round status dot.
-class Dot extends StatelessWidget {
+/// Status dot. Live states fade softly in and out; grey (off / nothing)
+/// and legend dots ([blink] false) stay still.
+class Dot extends StatefulWidget {
   final Color color;
   final double size;
-  const Dot(this.color, {super.key, this.size = 7});
+  final bool blink;
+  const Dot(this.color, {super.key, this.size = 7, this.blink = true});
   @override
-  Widget build(BuildContext context) => Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(color: color, shape: BoxShape.circle));
+  State<Dot> createState() => _DotState();
+}
+
+class _DotState extends State<Dot> with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 1600));
+
+  bool get _live => widget.blink && widget.color != O.grey;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_live) _c.repeat(reverse: true);
+  }
+
+  @override
+  void didUpdateWidget(Dot old) {
+    super.didUpdateWidget(old);
+    if (_live && !_c.isAnimating) _c.repeat(reverse: true);
+    if (!_live && _c.isAnimating) {
+      _c.stop();
+      _c.value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dot = Container(
+        width: widget.size,
+        height: widget.size,
+        decoration: BoxDecoration(color: widget.color, shape: BoxShape.circle));
+    if (!_live) return dot;
+    return FadeTransition(
+      opacity: Tween(begin: 1.0, end: 0.35)
+          .animate(CurvedAnimation(parent: _c, curve: Curves.easeInOut)),
+      child: dot,
+    );
+  }
 }
 
 /// Section header: LABEL left, hint right.

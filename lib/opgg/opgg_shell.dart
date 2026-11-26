@@ -8,20 +8,22 @@ import 'package:provider/provider.dart';
 
 import '../state/app_state.dart';
 import '../ui2/profile/devices.dart' show RePair;
-import '../ui2/profile/settings.dart' show MoreSettings;
 import '../ui2/screens/health_screen.dart' show HealthScreen;
 import '../ui2/screens/workout_screen.dart' show WorkoutScreen;
 import 'opgg_data.dart';
 import 'opgg_focus.dart';
 import 'opgg_overview.dart';
 import 'opgg_sleep.dart';
+import 'opgg_settings.dart';
 import 'opgg_style.dart';
+import 'opgg_sync.dart';
+import 'opgg_tasks.dart';
 
 enum OTab {
   overview('Überblick', 'Energie, Biomarker, Tag', Icons.change_history_rounded, true),
-  tasks('Aufgaben', 'Notion – kommt in Etappe 2', Icons.check_box_outlined, false),
+  tasks('Aufgaben', 'aus Notion, nach Energie', Icons.check_box_outlined, false),
   fitness('Fitness', 'Workouts – kommt in Etappe 3', Icons.fitness_center, false),
-  focus('Fokus', 'Lern- und Arbeits-Sessions', Icons.timer_outlined, true),
+  focus('Fokus', 'Sessions mit Pausen', Icons.timer_outlined, true),
   body('Körper', 'Körperwerte – kommt in Etappe 3', Icons.monitor_weight_outlined, false),
   sleep('Schlaf', 'Nacht, Wecker, Wind-down', Icons.dark_mode_rounded, true);
 
@@ -44,10 +46,13 @@ class _OpggShellState extends State<OpggShell> {
   final _pager = PageController();
   bool _menu = false;
   bool _bandPop = false;
+  bool _syncPop = false;
+  int _bandLogAt = 0;
   Future<OpggDay>? _data;
   int? _syncKey;
 
   final _focus = FocusStore.instance;
+  final _notion = NotionStore.instance;
 
   @override
   void initState() {
@@ -55,6 +60,7 @@ class _OpggShellState extends State<OpggShell> {
     final app = context.read<AppState>();
     _focus.buzz = app.buzzBand;
     _focus.addListener(_onFocus);
+    _notion.addListener(_onFocus);
   }
 
   void _onFocus() {
@@ -64,6 +70,7 @@ class _OpggShellState extends State<OpggShell> {
   @override
   void dispose() {
     _focus.removeListener(_onFocus);
+    _notion.removeListener(_onFocus);
     _pager.dispose();
     super.dispose();
   }
@@ -76,6 +83,28 @@ class _OpggShellState extends State<OpggShell> {
     });
     if (_pager.hasClients) _pager.jumpToPage(0);
   }
+
+  void _closePops() {
+    _menu = false;
+    _bandPop = false;
+    _syncPop = false;
+  }
+
+  void _settings() => Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const OpggSettings(bandState: bandState)));
+
+  void _startTask(OTask t) {
+    HapticFeedback.mediumImpact();
+    _focus.startTask(t.id, t.name); // no-op while a session runs
+    _go(OTab.focus);
+  }
+
+  /// Status dot of the current tab: orange = something open.
+  Color _tabDot() => switch (_tab) {
+        OTab.focus => _focus.phase == FPhase.paused ? O.orange : O.green,
+        OTab.tasks => _notion.started.isNotEmpty ? O.orange : O.green,
+        _ => O.green,
+      };
 
   void _goPage(int i) {
     setState(() => _page = i);
@@ -91,6 +120,13 @@ class _OpggShellState extends State<OpggShell> {
     // Reload the derived data whenever a sync lands (newest sample moved).
     final key = app.lastSynced?.tsEpoch ?? -1;
     if (_data == null || key != _syncKey) {
+      // Band syncs go to the Protokoll — at most every 30 min, not per drain.
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (_syncKey != null && key > 0 && now - _bandLogAt > 30 * 60000) {
+        _bandLogAt = now;
+        _notion.addLog('Band', true,
+            'Daten bis ${hhmm(DateTime.fromMillisecondsSinceEpoch(key * 1000))}');
+      }
       _syncKey = key;
       _data = loadOpggDay(app.repo);
     }
@@ -102,17 +138,37 @@ class _OpggShellState extends State<OpggShell> {
       body: Stack(children: [
         Column(children: [
           _TopBar(
-            dot: _tab == OTab.focus && _focus.phase == FPhase.paused ? O.orange : O.green,
+            dot: _tabDot(),
             tab: _tab,
             app: app,
+            sync: _notion.state,
             onMenu: () => setState(() {
-              _menu = !_menu;
-              _bandPop = false;
+              final v = !_menu;
+              _closePops();
+              _menu = v;
             }),
             onBand: () => setState(() {
-              _bandPop = !_bandPop;
-              _menu = false;
+              final v = !_bandPop;
+              _closePops();
+              _bandPop = v;
             }),
+            onSync: () => setState(() {
+              final v = !_syncPop;
+              _closePops();
+              _syncPop = v;
+            }),
+            onSyncHold: () async {
+              await HapticFeedback.heavyImpact();
+              if (app.isPaired) {
+                try {
+                  await app.syncNow();
+                } catch (_) {}
+              }
+              await _notion.sync(manual: true);
+              await HapticFeedback.mediumImpact();
+              await Future<void>.delayed(const Duration(milliseconds: 120));
+              await HapticFeedback.mediumImpact();
+            },
             onBandHold: () async {
               if (!app.isPaired) return;
               await HapticFeedback.heavyImpact();
@@ -123,8 +179,7 @@ class _OpggShellState extends State<OpggShell> {
               await Future<void>.delayed(const Duration(milliseconds: 120));
               await HapticFeedback.mediumImpact();
             },
-            onSettings: () => Navigator.of(context)
-                .push(MaterialPageRoute<void>(builder: (_) => const MoreSettings())),
+            onSettings: _settings,
             pages: pages,
             page: _page,
             onPage: _goPage,
@@ -143,18 +198,21 @@ class _OpggShellState extends State<OpggShell> {
             ),
           ),
         ]),
-        if (_menu || _bandPop)
+        if (_menu || _bandPop || _syncPop)
           Positioned.fill(
             child: GestureDetector(
-              onTap: () => setState(() {
-                _menu = false;
-                _bandPop = false;
-              }),
+              onTap: () => setState(_closePops),
               child: Container(color: Colors.black.withValues(alpha: _menu ? .4 : 0)),
             ),
           ),
-        if (_menu) _TabMenu(current: _tab, onPick: _go, focus: _focus.phase),
+        if (_menu)
+          _TabMenu(
+              current: _tab,
+              onPick: _go,
+              focus: _focus.phase,
+              tasksOpen: _notion.started.isNotEmpty),
         if (_bandPop) _BandPopover(app: app),
+        if (_syncPop) _SyncPopover(n: _notion),
       ]),
     );
   }
@@ -175,7 +233,8 @@ class _OpggShellState extends State<OpggShell> {
       case OTab.sleep:
       case OTab.focus:
         final Widget today = switch (_tab) {
-          OTab.overview => OverviewToday(day: d),
+          OTab.overview =>
+            OverviewToday(day: d, onStart: _startTask, onTasks: () => _go(OTab.tasks)),
           OTab.sleep => SleepToday(day: d),
           _ => FocusToday(energy: Energy.of(d).total),
         };
@@ -211,13 +270,39 @@ class _OpggShellState extends State<OpggShell> {
               builder: (_) => const Scaffold(body: SafeArea(child: HealthScreen())))),
         );
       case OTab.tasks:
-        return _Placeholder(
-          icon: _tab.icon,
-          title: '${_tab.label} kommt in Etappe 2',
-          text: 'Mit Notion-Anbindung, Fortschritt und Sync-Status.',
-        );
+        return TasksPage(
+            energy: Energy.of(d).total, onStart: _startTask, onSettings: _settings);
     }
   }
+}
+
+/// Rounded header button with the same border everywhere.
+class _Pill extends StatelessWidget {
+  final List<Widget> children;
+  final VoidCallback? onTap, onLongPress;
+  final double height;
+  final EdgeInsets padding;
+  const _Pill(
+      {required this.children,
+      this.onTap,
+      this.onLongPress,
+      this.height = 30,
+      this.padding = const EdgeInsets.symmetric(horizontal: 10)});
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+        onTap: onTap,
+        onLongPress: onLongPress,
+        child: Container(
+          height: height,
+          padding: padding,
+          decoration: BoxDecoration(
+            color: O.pill,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: O.line),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: children),
+        ),
+      );
 }
 
 // ── top bar ────────────────────────────────────────────────────────────────
@@ -237,7 +322,8 @@ class _OpggShellState extends State<OpggShell> {
 class _TopBar extends StatelessWidget {
   final OTab tab;
   final AppState app;
-  final VoidCallback onMenu, onBand, onBandHold, onSettings;
+  final VoidCallback onMenu, onBand, onBandHold, onSettings, onSync, onSyncHold;
+  final SyncState sync;
   final List<String> pages;
   final int page;
   final ValueChanged<int> onPage;
@@ -249,6 +335,9 @@ class _TopBar extends StatelessWidget {
     required this.onMenu,
     required this.onBand,
     required this.onBandHold,
+    required this.onSync,
+    required this.onSyncHold,
+    required this.sync,
     required this.onSettings,
     required this.pages,
     required this.page,
@@ -284,46 +373,42 @@ class _TopBar extends StatelessWidget {
                   child: Icon(tab.icon, size: 16, color: O.ink),
                 ),
                 const SizedBox(width: 8),
-                InkWell(
-                  borderRadius: BorderRadius.circular(10),
+                _Pill(
                   onTap: onMenu,
-                  child: Ink(
-                    height: 36,
-                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [Color(0xFF36363A), Color(0xFF2A2A2D)]),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Row(children: [
-                      Text(tab.label,
-                          style: const TextStyle(
-                              fontSize: 14, fontWeight: FontWeight.w600, color: O.ink)),
-                      const SizedBox(width: 8),
-                      // Status dot: green = all good, orange = something open.
-                      Dot(dot),
-                    ]),
-                  ),
+                  height: 34,
+                  padding: const EdgeInsets.fromLTRB(14, 0, 12, 0),
+                  children: [
+                    Text(tab.label,
+                        style: const TextStyle(
+                            fontSize: 14, fontWeight: FontWeight.w600, color: O.ink)),
+                    const SizedBox(width: 8),
+                    // Status dot: green = all good, orange = something open.
+                    Dot(dot),
+                  ],
                 ),
                 const Spacer(),
-                GestureDetector(
+                _Pill(
+                  onTap: onSync,
+                  onLongPress: onSyncHold,
+                  children: [
+                    Dot(syncColor(sync)),
+                    const SizedBox(width: 6),
+                    Text(sync == SyncState.syncing ? 'Sync …' : 'Sync',
+                        style: const TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.w600, color: O.ink2)),
+                  ],
+                ),
+                const SizedBox(width: 6),
+                _Pill(
                   onTap: onBand,
                   onLongPress: onBandHold,
-                  child: Container(
-                    height: 28,
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                    decoration: BoxDecoration(
-                        color: O.pill, borderRadius: BorderRadius.circular(999)),
-                    child: Row(children: [
-                      Dot(band.color),
-                      const SizedBox(width: 6),
-                      Text(app.syncingNow ? 'Sync …' : 'Band',
-                          style: const TextStyle(
-                              fontSize: 12, fontWeight: FontWeight.w600, color: O.ink2)),
-                    ]),
-                  ),
+                  children: [
+                    Dot(band.color),
+                    const SizedBox(width: 6),
+                    Text(app.syncingNow ? 'Band …' : 'Band',
+                        style: const TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.w600, color: O.ink2)),
+                  ],
                 ),
                 const SizedBox(width: 6),
                 SizedBox(
@@ -332,7 +417,9 @@ class _TopBar extends StatelessWidget {
                   child: IconButton(
                     onPressed: onSettings,
                     tooltip: 'Einstellungen',
-                    style: IconButton.styleFrom(backgroundColor: O.raised2),
+                    style: IconButton.styleFrom(
+                        backgroundColor: O.pill,
+                        side: const BorderSide(color: O.line)),
                     icon: const Icon(Icons.settings_outlined, size: 18, color: O.ink2),
                   ),
                 ),
@@ -354,7 +441,9 @@ class _TabMenu extends StatelessWidget {
   final OTab current;
   final ValueChanged<OTab> onPick;
   final FPhase focus;
-  const _TabMenu({required this.current, required this.onPick, required this.focus});
+  final bool tasksOpen;
+  const _TabMenu(
+      {required this.current, required this.onPick, required this.focus, required this.tasksOpen});
   @override
   Widget build(BuildContext context) {
     final top = MediaQuery.of(context).padding.top + 46;
@@ -391,6 +480,10 @@ class _TabMenu extends StatelessWidget {
                         Text(t.hint, style: O.small),
                       ]),
                     ),
+                    if (t == OTab.tasks && tasksOpen) ...[
+                      const Dot(O.orange),
+                      const SizedBox(width: 8),
+                    ],
                     if (t == OTab.focus && focus != FPhase.idle) ...[
                       Dot(focus == FPhase.running ? O.green : O.orange),
                       const SizedBox(width: 8),
@@ -457,6 +550,45 @@ class _BandPopover extends StatelessWidget {
                   fontSize: 13, fontWeight: FontWeight.w600, color: O.ink, fontFeatures: O.tabular)),
         ]),
       );
+}
+
+class _SyncPopover extends StatelessWidget {
+  final NotionStore n;
+  const _SyncPopover({required this.n});
+  @override
+  Widget build(BuildContext context) {
+    final st = n.state;
+    final top = MediaQuery.of(context).padding.top + 44;
+    return Positioned(
+      top: top,
+      right: 110,
+      width: 240,
+      child: Material(
+        color: O.pill,
+        borderRadius: BorderRadius.circular(14),
+        elevation: 12,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+            Row(children: [
+              Dot(syncColor(st), size: 8),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(st == SyncState.off ? 'Notion nicht verbunden' : 'Notion ${syncLabel(st, n)}',
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: O.ink)),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            Text('Letzter Sync ${agoLabel(n.lastOk)} · ${n.queue.length} ausstehend',
+                style: const TextStyle(fontSize: 12, color: O.ink2)),
+            const SizedBox(height: 8),
+            const Text('Gedrückt halten: Band und Notion jetzt abgleichen',
+                style: TextStyle(fontSize: 11, color: O.ink3)),
+          ]),
+        ),
+      ),
+    );
+  }
 }
 
 class _Placeholder extends StatelessWidget {

@@ -125,8 +125,13 @@ class NotionApi {
       'icon': {'type': 'emoji', 'emoji': emoji},
       'initial_data_source': {'properties': properties},
     });
-    final ds = j['data_sources'];
-    if (ds is List && ds.isNotEmpty && ds.first is Map) return '${ds.first['id']}';
+    String? first(Map m) {
+      final ds = m['data_sources'];
+      return ds is List && ds.isNotEmpty && ds.first is Map ? '${ds.first['id']}' : null;
+    }
+
+    final id = first(j) ?? first(await _call('GET', 'databases/${j['id']}'));
+    if (id != null) return id;
     throw NotionError(500, 'no_data_source', 'database created without data source');
   }
 

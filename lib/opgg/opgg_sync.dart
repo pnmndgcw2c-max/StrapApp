@@ -305,7 +305,7 @@ class NotionStore extends ChangeNotifier {
       var t = await existing(kTasksTitle);
       t ??= await api.createDatabase(page.id, kTasksTitle, '✅', tasksSchema());
       var s = await existing(kSessionsTitle);
-      s ??= await api.createDatabase(page.id, kSessionsTitle, '⏱️', sessionsSchema(t));
+      s ??= await api.createDatabase(page.id, kSessionsTitle, '⏱', sessionsSchema(t));
       pageId = page.id;
       pageTitle = page.title;
       tasksDs = t;

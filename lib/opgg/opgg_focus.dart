@@ -334,6 +334,8 @@ class _FocusTodayState extends State<FocusToday> {
   Timer? _tick;
   AppState? _app;
   bool _menu = false;
+  String? _note;
+  Timer? _noteT;
 
   @override
   void initState() {
@@ -348,6 +350,7 @@ class _FocusTodayState extends State<FocusToday> {
   @override
   void dispose() {
     _tick?.cancel();
+    _noteT?.cancel();
     _app?.releaseLiveHrView();
     super.dispose();
   }
@@ -484,7 +487,7 @@ class _FocusTodayState extends State<FocusToday> {
               Row(children: [
                 Expanded(
                     child: _Mini('Pausen',
-                        '${f.breaks} · ${_dur(f.breakMs + f.curBreak)}')),
+                        '${f.breaks} · ${_clock(f.breakMs + f.curBreak)}')),
                 const SizedBox(width: 8),
                 Expanded(
                     child: _Mini('Puls jetzt', hr == null ? '–' : '$hr bpm',
@@ -516,6 +519,11 @@ class _FocusTodayState extends State<FocusToday> {
                       onTap: f.phase == FPhase.idle ? null : () => _finish(context)),
                 ),
               ]),
+              if (_note != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Text(_note!, textAlign: TextAlign.center, style: O.small),
+                ),
               const SizedBox(height: 24),
               SectionHead('Heute', hint: '${_dur(todayMs)} fokussiert'),
               const SizedBox(height: 10),
@@ -608,7 +616,14 @@ class _FocusTodayState extends State<FocusToday> {
       progress = await showProgressSheet(context, f.taskTitle ?? 'Aufgabe');
       if (progress == null) return; // sheet dismissed: keep running
     }
-    f.finish(progress: progress);
+    final s = f.finish(progress: progress);
+    if (s != null && s.studiedMs < 60000 && mounted) {
+      setState(() => _note = 'Unter 1 Minute – nicht gespeichert');
+      _noteT?.cancel();
+      _noteT = Timer(const Duration(seconds: 4), () {
+        if (mounted) setState(() => _note = null);
+      });
+    }
   }
 }
 

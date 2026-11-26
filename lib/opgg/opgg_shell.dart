@@ -12,6 +12,7 @@ import '../ui2/profile/settings.dart' show MoreSettings;
 import '../ui2/screens/health_screen.dart' show HealthScreen;
 import '../ui2/screens/workout_screen.dart' show WorkoutScreen;
 import 'opgg_data.dart';
+import 'opgg_focus.dart';
 import 'opgg_overview.dart';
 import 'opgg_sleep.dart';
 import 'opgg_style.dart';
@@ -20,7 +21,7 @@ enum OTab {
   overview('Überblick', 'Energie, Biomarker, Tag', Icons.change_history_rounded, true),
   tasks('Aufgaben', 'Notion – kommt in Etappe 2', Icons.check_box_outlined, false),
   fitness('Fitness', 'Workouts – kommt in Etappe 3', Icons.fitness_center, false),
-  focus('Fokus', 'Lern-Sessions – kommt in Etappe 2', Icons.timer_outlined, false),
+  focus('Fokus', 'Lern- und Arbeits-Sessions', Icons.timer_outlined, true),
   body('Körper', 'Körperwerte – kommt in Etappe 3', Icons.monitor_weight_outlined, false),
   sleep('Schlaf', 'Nacht, Wecker, Wind-down', Icons.dark_mode_rounded, true);
 
@@ -46,8 +47,23 @@ class _OpggShellState extends State<OpggShell> {
   Future<OpggDay>? _data;
   int? _syncKey;
 
+  final _focus = FocusStore.instance;
+
+  @override
+  void initState() {
+    super.initState();
+    final app = context.read<AppState>();
+    _focus.buzz = app.buzzBand;
+    _focus.addListener(_onFocus);
+  }
+
+  void _onFocus() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    _focus.removeListener(_onFocus);
     _pager.dispose();
     super.dispose();
   }
@@ -86,6 +102,7 @@ class _OpggShellState extends State<OpggShell> {
       body: Stack(children: [
         Column(children: [
           _TopBar(
+            dot: _tab == OTab.focus && _focus.phase == FPhase.paused ? O.orange : O.green,
             tab: _tab,
             app: app,
             onMenu: () => setState(() {
@@ -136,7 +153,7 @@ class _OpggShellState extends State<OpggShell> {
               child: Container(color: Colors.black.withValues(alpha: _menu ? .4 : 0)),
             ),
           ),
-        if (_menu) _TabMenu(current: _tab, onPick: _go),
+        if (_menu) _TabMenu(current: _tab, onPick: _go, focus: _focus.phase),
         if (_bandPop) _BandPopover(app: app),
       ]),
     );
@@ -156,18 +173,23 @@ class _OpggShellState extends State<OpggShell> {
     switch (_tab) {
       case OTab.overview:
       case OTab.sleep:
-        final today = _tab == OTab.overview
-            ? OverviewToday(day: d)
-            : SleepToday(day: d);
+      case OTab.focus:
+        final Widget today = switch (_tab) {
+          OTab.overview => OverviewToday(day: d),
+          OTab.sleep => SleepToday(day: d),
+          _ => FocusToday(energy: Energy.of(d).total),
+        };
         return PageView(
           controller: _pager,
           onPageChanged: (i) => setState(() => _page = i),
           children: [
             today,
             for (final n in const [7, 30])
-              _tab == OTab.overview
-                  ? OverviewPeriod(day: d, n: n)
-                  : SleepPeriod(day: d, n: n),
+              switch (_tab) {
+                OTab.overview => OverviewPeriod(day: d, n: n),
+                OTab.sleep => SleepPeriod(day: d, n: n),
+                _ => FocusPeriod(n: n),
+              },
           ],
         );
       case OTab.fitness:
@@ -189,7 +211,6 @@ class _OpggShellState extends State<OpggShell> {
               builder: (_) => const Scaffold(body: SafeArea(child: HealthScreen())))),
         );
       case OTab.tasks:
-      case OTab.focus:
         return _Placeholder(
           icon: _tab.icon,
           title: '${_tab.label} kommt in Etappe 2',
@@ -220,7 +241,9 @@ class _TopBar extends StatelessWidget {
   final List<String> pages;
   final int page;
   final ValueChanged<int> onPage;
+  final Color dot;
   const _TopBar({
+    required this.dot,
     required this.tab,
     required this.app,
     required this.onMenu,
@@ -279,8 +302,8 @@ class _TopBar extends StatelessWidget {
                           style: const TextStyle(
                               fontSize: 14, fontWeight: FontWeight.w600, color: O.ink)),
                       const SizedBox(width: 8),
-                      // Status dot: green = nothing to do (to-dos arrive in Etappe 2).
-                      const Dot(O.green),
+                      // Status dot: green = all good, orange = something open.
+                      Dot(dot),
                     ]),
                   ),
                 ),
@@ -330,7 +353,8 @@ class _TopBar extends StatelessWidget {
 class _TabMenu extends StatelessWidget {
   final OTab current;
   final ValueChanged<OTab> onPick;
-  const _TabMenu({required this.current, required this.onPick});
+  final FPhase focus;
+  const _TabMenu({required this.current, required this.onPick, required this.focus});
   @override
   Widget build(BuildContext context) {
     final top = MediaQuery.of(context).padding.top + 46;
@@ -367,6 +391,10 @@ class _TabMenu extends StatelessWidget {
                         Text(t.hint, style: O.small),
                       ]),
                     ),
+                    if (t == OTab.focus && focus != FPhase.idle) ...[
+                      Dot(focus == FPhase.running ? O.green : O.orange),
+                      const SizedBox(width: 8),
+                    ],
                     if (t == current) const Icon(Icons.check, size: 16, color: O.ink),
                   ]),
                 ),

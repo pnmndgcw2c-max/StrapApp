@@ -25,6 +25,22 @@ class OpggDay {
     return null;
   }
 
+  /// Newest value of [key] if it belongs to today or the last [maxAgeDays]
+  /// days, with its local day. Used where the Today bundle still withholds a
+  /// night that the derive already stored (it waits ~1 h past wake): the value
+  /// is the real stored one, shown with its date — never a substitute.
+  ({double v, DateTime day})? recent(String key, {int maxAgeDays = 1}) {
+    final p = latest(key);
+    if (p == null) return null;
+    final d = DateTime.fromMillisecondsSinceEpoch(p.t * 1000);
+    final now = DateTime.now();
+    final age = DateTime(now.year, now.month, now.day)
+        .difference(DateTime(d.year, d.month, d.day))
+        .inDays;
+    if (age < 0 || age > maxAgeDays) return null;
+    return (v: p.v, day: DateTime(d.year, d.month, d.day));
+  }
+
   /// Newest point of [key], or null.
   TrendPoint? latest(String key) {
     final pts = series[key];
@@ -42,6 +58,10 @@ const kSeriesKeys = [
   'deep', // deep sleep, minutes
   'light',
   'rem',
+  'efficiency', // sleep efficiency %
+  'stress', // 0–100 (Baevsky SI over the scored night)
+  'resp_rate', // breaths/min
+  'skin_temp_z', // skin temperature vs. personal norm (z)
 ];
 
 Future<OpggDay> loadOpggDay(LocalRepository? repo) async {

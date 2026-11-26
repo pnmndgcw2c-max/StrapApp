@@ -7,28 +7,47 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../models/metric.dart' show baselineCountsFromNote;
 import '../state/app_state.dart';
 import 'opgg_charts.dart';
 import 'opgg_data.dart';
 import 'opgg_style.dart';
 
+/// What the Today bundle says, or — while it still withholds last night
+/// (it waits about an hour past wake) — the value the derive already stored
+/// for that night. Both are OpenStrap's own numbers.
+double? pick(num? today, OpggDay d, String key) =>
+    today?.toDouble() ?? d.recent(key)?.v;
+
+/// Recovery (OpenStrap readiness) needs a personal baseline first.
+String recoveryWait(OpggDay d) {
+  final c = baselineCountsFromNote(d.today.readiness.note);
+  if (c != null) return 'lernt noch · ${c.have}/${c.need} Nächte';
+  return 'lernt noch · braucht ca. 14 Nächte';
+}
+
 /// The three sides of the triangle, each 0–100 or null.
 class Energy {
   final double? sleep, recovery, calm;
-  const Energy(this.sleep, this.recovery, this.calm);
+  final double? sleepMin, needMin; // for the "why" rows
+  final bool needIsGoal; // need not learned yet → Jonas' 8 h goal
+  const Energy(this.sleep, this.recovery, this.calm,
+      {this.sleepMin, this.needMin, this.needIsGoal = false});
 
   factory Energy.of(OpggDay d) {
     final t = d.today;
-    final dur = t.sleepDuration.value?.toDouble();
-    final need = t.sleepNeed.value?.toDouble();
-    final sleep = (dur != null && need != null && need > 0)
-        ? (dur / need * 100).clamp(0.0, 100.0)
-        : null;
+    final dur = pick(t.sleepDuration.value, d, 'sleep');
+    final learned = t.sleepNeed.value?.toDouble();
+    // Until OpenStrap has learned the sleep need, measure against the 8 h
+    // goal Jonas set — labelled as the goal wherever it is shown.
+    final need = learned ?? 480.0;
+    final sleep = dur == null ? null : (dur / need * 100).clamp(0.0, 100.0);
     // 'recovery' and 'readiness' are the same metric in the read seam.
-    final rec = t.readiness.value?.toDouble().clamp(0.0, 100.0);
-    final stress = t.stress?.score;
-    final calm = stress == null ? null : (100 - stress).clamp(0, 100).toDouble();
-    return Energy(sleep, rec, calm);
+    final rec = pick(t.readiness.value, d, 'recovery')?.clamp(0.0, 100.0);
+    final stress = pick(t.stress?.score, d, 'stress');
+    final calm = stress == null ? null : (100 - stress).clamp(0.0, 100.0);
+    return Energy(sleep, rec, calm,
+        sleepMin: dur, needMin: need, needIsGoal: learned == null);
   }
 
   double? get total => (sleep != null && recovery != null && calm != null)
@@ -57,11 +76,12 @@ class _OverviewTodayState extends State<OverviewToday> {
     final now = DateTime.now();
 
     final hr = app.isConnected ? app.liveHr : null;
-    final rmssd = t.hrv?.rmssd;
-    final rhr = t.restingHr.value;
-    final resp = t.resp?.value;
-    final stress = t.stress?.score;
-    final skin = t.skinTempIdx;
+    final rmssd = pick(t.hrv?.rmssd, d, 'hrv');
+    final rhr = pick(t.restingHr.value, d, 'resting_hr');
+    final resp = pick(t.resp?.value, d, 'resp_rate');
+    final stress = pick(t.stress?.score, d, 'stress');
+    final skin = pick(t.skinTempIdx, d, 'skin_temp_z');
+    final night = d.recent('sleep')?.day ?? d.recent('hrv')?.day;
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
@@ -106,18 +126,19 @@ class _OverviewTodayState extends State<OverviewToday> {
                     _why3(
                         'Schlaf',
                         e.sleep,
-                        t.sleepDuration.value == null
+                        e.sleepMin == null
                             ? 'keine Nacht erfasst'
-                            : '${hMin(t.sleepDuration.value!)} von '
-                                '${t.sleepNeed.value == null ? '—' : hMin(t.sleepNeed.value!)} Bedarf'),
+                            : '${hMin(e.sleepMin!)} von ${hMin(e.needMin!)}'
+                                '${e.needIsGoal ? ' Ziel' : ' Bedarf'}'),
                     _why3('Recovery', e.recovery,
-                        rmssd == null ? 'aus HRV, Ruhepuls und Schlaf' : 'HRV ${rmssd.round()} ms'),
+                        e.recovery == null ? recoveryWait(d) : 'HRV, Ruhepuls, Schlaf'),
                     _why3('Ruhe', e.calm,
-                        stress == null ? 'noch kein Stresswert' : 'Stress $stress von 100'),
+                        stress == null ? 'noch kein Stresswert' : 'Stress ${stress.round()} von 100'),
                     if (e.total == null)
                       const Padding(
                         padding: EdgeInsets.only(top: 6),
-                        child: Text('Energie erscheint, sobald alle drei Werte da sind.',
+                        child: Text(
+                            'Die Energie-Zahl erscheint, sobald alle drei Seiten Werte haben.',
                             style: O.small),
                       ),
                   ]),
@@ -128,6 +149,7 @@ class _OverviewTodayState extends State<OverviewToday> {
         ),
         const SizedBox(height: 22),
         SectionHead('Biomarker',
+            hint: night == null ? null : nightLabel(night),
             trailing: Row(mainAxisSize: MainAxisSize.min, children: [
               Dot(hr != null ? O.green : (app.isPaired ? O.orange : O.red)),
               const SizedBox(width: 6),
@@ -146,8 +168,9 @@ class _OverviewTodayState extends State<OverviewToday> {
             _Bio('Ruhepuls', rhr?.round().toString(), 'bpm'),
             _Bio('HRV', rmssd?.round().toString(), 'ms'),
             _Bio('Atmung', resp == null ? null : de(resp, 1), '/min'),
-            _Bio('Stress', stress?.toString(), '/100'),
-            _Bio('Haut', skin == null ? null : '${skin >= 0 ? '+' : '−'}${de(skin.abs(), 1)}', '°C Δ'),
+            _Bio('Stress', stress?.round().toString(), '/100'),
+            _Bio('Haut', skin == null ? null : '${skin >= 0 ? '+' : '−'}${de(skin.abs(), 1)}',
+                'vs. normal'),
           ],
         ),
         const SizedBox(height: 22),
@@ -329,7 +352,8 @@ class OverviewPeriod extends StatelessWidget {
         const SizedBox(height: 10),
         Row(children: [
           Expanded(
-              child: SumTile('Ø Recovery', ar == null ? '--' : '${ar.round()}', '%',
+              child: SumTile('Ø Recovery', ar == null ? '--' : '${ar.round()}',
+                  ar == null ? recoveryWait(day).replaceFirst('lernt noch · ', 'lernt: ') : '%',
                   bar: ar == null ? null : ar / 100, height: 118)),
           const SizedBox(width: 8),
           Expanded(
@@ -337,7 +361,7 @@ class OverviewPeriod extends StatelessWidget {
                   bar: asl == null ? null : asl / 8, height: 118)),
         ]),
         const SizedBox(height: 12),
-        TrendCard(spec: _recSpec, days: days, values: rec),
+        TrendCard(spec: _recSpec, days: days, values: rec, emptyNote: recoveryWait(day)),
         const SizedBox(height: 12),
         TrendCard(spec: _hrvSpec, days: days, values: valuesFor(day, _hrvSpec, days)),
         const SizedBox(height: 12),

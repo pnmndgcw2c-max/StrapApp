@@ -51,18 +51,21 @@ class _Night extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = day.today;
-    final dur = t.sleepDuration.value;
-    final need = t.sleepNeed.value;
-    final eff = t.sleepEfficiency.value;
     final last = day.latest('sleep');
     final nightDay = last == null ? null : DateTime.fromMillisecondsSinceEpoch(last.t * 1000);
     double? stage(String k) => nightDay == null ? null : day.on(k, nightDay);
+    // The Today bundle waits ~1 h past wake before it shows the night; the
+    // derive's stored night is the same measurement, so read that meanwhile.
+    final dur = t.sleepDuration.value?.toDouble() ?? stage('sleep');
+    final need = t.sleepNeed.value?.toDouble();
+    final eff = t.sleepEfficiency.value?.toDouble() ?? stage('efficiency');
     final deep = stage('deep'), light = stage('light'), rem = stage('rem');
     final stagesKnown = deep != null && light != null && rem != null;
     final total = stagesKnown ? deep + light + rem : 0.0;
 
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      SectionHead('Letzte Nacht', hint: nightDay == null ? null : wdDm(nightDay)),
+      SectionHead(nightDay == null ? 'Letzte Nacht' : nightLabel(nightDay).replaceFirst('letzte', 'Letzte'),
+          hint: nightDay == null ? null : wdDm(nightDay)),
       const SizedBox(height: 10),
       Container(
         padding: const EdgeInsets.all(16),
@@ -75,14 +78,14 @@ class _Night extends StatelessWidget {
             const SizedBox(width: 10),
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
-              child: Text(need == null ? 'Bedarf —' : 'von ${hMin(need)} Bedarf', style: O.small),
+              child: Text(need == null ? 'von 8 h Ziel' : 'von ${hMin(need)} Bedarf', style: O.small),
             ),
           ]),
           const SizedBox(height: 12),
           ClipRRect(
             borderRadius: BorderRadius.circular(999),
             child: LinearProgressIndicator(
-              value: (dur != null && need != null && need > 0) ? (dur / need).clamp(0.0, 1.0) : 0,
+              value: dur == null ? 0 : (dur / (need ?? 480)).clamp(0.0, 1.0),
               minHeight: 6,
               backgroundColor: O.raised,
               valueColor: const AlwaysStoppedAnimation(O.ink),
@@ -151,40 +154,56 @@ class _Alarm extends StatefulWidget {
   State<_Alarm> createState() => _AlarmState();
 }
 
+/// The alarm is the engine's WEEKLY SCHEDULE, not a one-shot SET_ALARM: on
+/// every connect/sync the engine re-arms the next scheduled occurrence — and
+/// with an empty schedule it DISABLES whatever the band holds. A one-shot set
+/// from here was therefore wiped by the first reconnect during the night.
 class _AlarmState extends State<_Alarm> {
-  int? _h, _m; // picked, not yet sent
+  int? _h, _m; // picked, not yet saved
+  Set<int>? _days; // 0=Mo..6=So, edited, not yet saved
   bool _busy = false;
-  String? _err;
+  String? _err, _info;
 
   @override
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
     final (armedAt, state) = alarmArmOf(app);
     final now = DateTime.now();
+    final sched = app.alarmSchedule;
+    final on = {for (final e in sched) if (e.enabled) e.weekday};
+    final firstOn = sched.where((e) => e.enabled).firstOrNull;
     final live = armedAt != null && armedAt.isAfter(now);
-    final h = _h ?? (live ? armedAt.hour : 7);
-    final m = _m ?? (live ? armedAt.minute : 0);
-    final dirty = _h != null && (!live || armedAt.hour != _h || armedAt.minute != _m);
+
+    final h = _h ?? firstOn?.hour ?? (live ? armedAt.hour : 7);
+    final m = _m ?? firstOn?.minute ?? (live ? armedAt.minute : 0);
+    // Nothing scheduled yet: suggest the day of the next occurrence.
+    final days = _days ?? (on.isNotEmpty ? on : {nextAt(h, m).weekday - 1});
+    final timeDirty = firstOn == null || firstOn.hour != h || firstOn.minute != m;
+    final dirty = (_days != null && !_sameSet(_days!, on)) ||
+        (_h != null && timeDirty) ||
+        on.isEmpty;
 
     final (Color dot, String status) = _err != null
         ? (O.red, _err!)
-        : !live
-            ? (O.grey, armedAt != null ? 'Wecker ist gelaufen' : 'Kein Wecker gestellt')
-            : switch (state) {
-                AlarmArmState.confirmed => (O.green, 'Band vibriert ${_when(armedAt)}'),
-                AlarmArmState.pending => (O.orange, 'Wird ans Band gesendet …'),
-                _ => (O.orange, 'Gestellt, Band hat nicht bestätigt'),
-              };
+        : on.isEmpty
+            ? (O.grey, 'Kein Wecker gestellt')
+            : !live
+                ? (O.orange, _info ?? 'Gespeichert – geht beim nächsten Verbinden ans Band')
+                : switch (state) {
+                    AlarmArmState.confirmed => (O.green, 'Band vibriert ${_when(armedAt)}'),
+                    AlarmArmState.pending => (O.orange, 'Wird ans Band gesendet …'),
+                    _ => (O.orange, 'Gestellt für ${_when(armedAt)}, Band hat nicht bestätigt'),
+                  };
 
-    final wake = nextAt(h, m);
-    final until = wake.difference(now);
+    final next = _nextFor(days, h, m);
+    final until = next?.difference(now);
 
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       SectionHead('Wecker',
           trailing: Row(mainAxisSize: MainAxisSize.min, children: [
             Dot(dot),
             const SizedBox(width: 6),
-            Text(live ? 'aktiv' : 'aus', style: O.small),
+            Text(on.isEmpty ? 'aus' : 'aktiv', style: O.small),
           ])),
       const SizedBox(height: 10),
       Container(
@@ -198,12 +217,12 @@ class _AlarmState extends State<_Alarm> {
               data: const CupertinoThemeData(
                 brightness: Brightness.dark,
                 textTheme: CupertinoTextThemeData(
-                  dateTimePickerTextStyle: TextStyle(
-                      fontSize: 34, fontWeight: FontWeight.w300, color: O.ink),
+                  dateTimePickerTextStyle:
+                      TextStyle(fontSize: 34, fontWeight: FontWeight.w300, color: O.ink),
                 ),
               ),
               child: CupertinoDatePicker(
-                key: ValueKey(_h == null ? 'armed-$h:$m' : 'edit'),
+                key: ValueKey(_h == null ? 'saved-$h:$m' : 'edit'),
                 mode: CupertinoDatePickerMode.time,
                 use24hFormat: true,
                 itemExtent: 44,
@@ -216,7 +235,41 @@ class _AlarmState extends State<_Alarm> {
               ),
             ),
           ),
-          Text('in ${until.inHours} h ${pad2(until.inMinutes % 60)} min · ${_when(wake)}',
+          const SizedBox(height: 6),
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            for (var i = 0; i < 7; i++)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 3),
+                child: GestureDetector(
+                  onTap: () => setState(() {
+                    final n = {...days};
+                    n.contains(i) ? n.remove(i) : n.add(i);
+                    _days = n;
+                    _err = null;
+                  }),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    width: 38,
+                    height: 34,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: days.contains(i) ? O.ink : O.pill,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(kWd[i],
+                        style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: days.contains(i) ? O.bg : O.ink3)),
+                  ),
+                ),
+              ),
+          ]),
+          const SizedBox(height: 10),
+          Text(
+              next == null || until == null
+                  ? 'Kein Tag ausgewählt'
+                  : 'nächster: ${_when(next)} · in ${until.inHours} h ${pad2(until.inMinutes % 60)} min',
               style: O.small),
         ]),
       ),
@@ -228,7 +281,7 @@ class _AlarmState extends State<_Alarm> {
       ]),
       const SizedBox(height: 14),
       Row(children: [
-        if (live) ...[
+        if (on.isNotEmpty) ...[
           Expanded(
             child: OButton('Aus', onTap: _busy ? null : () => _clear(app), primary: false, height: 48),
           ),
@@ -237,15 +290,29 @@ class _AlarmState extends State<_Alarm> {
         Expanded(
           flex: 2,
           child: OButton(
-            _busy ? 'Sende …' : (live && !dirty ? 'Gestellt' : 'Wecker stellen'),
-            onTap: (_busy || (live && !dirty)) ? null : () => _set(app, h, m),
+            _busy ? 'Sende …' : (on.isEmpty ? 'Wecker stellen' : (dirty ? 'Speichern' : 'Gestellt')),
+            onTap: (_busy || !dirty || days.isEmpty) ? null : () => _save(app, h, m, days, on),
             height: 48,
           ),
         ),
       ]),
       const SizedBox(height: 10),
-      const Text('Das Band vibriert zur Weckzeit – auch ohne Handy in der Nähe.', style: O.small),
+      const Text(
+          'Wiederholt sich an den markierten Tagen. Das Band vibriert auch ohne Handy in der Nähe.',
+          style: O.small),
     ]);
+  }
+
+  static bool _sameSet(Set<int> a, Set<int> b) => a.length == b.length && a.containsAll(b);
+
+  DateTime? _nextFor(Set<int> days, int h, int m) {
+    if (days.isEmpty) return null;
+    final now = DateTime.now();
+    for (var k = 0; k <= 7; k++) {
+      final t = DateTime(now.year, now.month, now.day + k, h, m);
+      if (t.isAfter(now) && days.contains(t.weekday - 1)) return t;
+    }
+    return null;
   }
 
   String _when(DateTime t) {
@@ -259,9 +326,43 @@ class _AlarmState extends State<_Alarm> {
     return '$day ${hhmm(t)}';
   }
 
-  Future<void> _set(AppState app, int h, int m) async {
+  Future<void> _save(AppState app, int h, int m, Set<int> days, Set<int> on) async {
+    setState(() {
+      _busy = true;
+      _err = null;
+      _info = null;
+    });
+    try {
+      // One time for every weekday (one band write), then flip only the days
+      // whose on/off changed. The schedule is saved even when offline.
+      var onBand = await app.setWakeTimeAllDays(hour: h, minute: m);
+      for (var i = 0; i < 7; i++) {
+        final want = days.contains(i);
+        if (want != on.contains(i)) {
+          onBand = await app.setScheduleDay(weekday: i, enabled: want);
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        _h = null;
+        _m = null;
+        _days = null;
+        if (!onBand) {
+          _info = app.isConnected
+              ? 'Gespeichert – Band hat noch nicht geantwortet'
+              : 'Gespeichert – geht ans Band, sobald es verbunden ist';
+        }
+      });
+    } catch (_) {
+      if (mounted) setState(() => _err = 'Konnte den Wecker nicht speichern');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _clear(AppState app) async {
     if (!app.isConnected) {
-      setState(() => _err = 'Band nicht verbunden – Band antippen, dann nochmal');
+      setState(() => _err = 'Band nicht verbunden – zum Ausschalten muss es erreichbar sein');
       return;
     }
     setState(() {
@@ -269,29 +370,10 @@ class _AlarmState extends State<_Alarm> {
       _err = null;
     });
     try {
-      await app.setAlarm(nextAt(h, m));
-      if (!mounted) return;
-      setState(() {
-        _h = null;
-        _m = null;
-      });
+      await app.clearAlarm(); // cancel-all: clears the band and the schedule
+      if (mounted) setState(() => _days = null);
     } catch (_) {
-      if (!mounted) return;
-      setState(() => _err = 'Band hat den Wecker nicht angenommen');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _clear(AppState app) async {
-    setState(() {
-      _busy = true;
-      _err = null;
-    });
-    try {
-      await app.clearAlarm();
-    } catch (_) {
-      if (mounted) setState(() => _err = 'Konnte Wecker nicht löschen');
+      if (mounted) setState(() => _err = 'Band nicht erreicht – Wecker ist noch aktiv');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -322,10 +404,11 @@ class _WindDownState extends State<_WindDown> {
     final (armedAt, _) = alarmArmOf(app);
     final now = DateTime.now();
     final wake = (armedAt != null && armedAt.isAfter(now)) ? armedAt : null;
-    final need = widget.day.today.sleepNeed.value;
+    final learned = widget.day.today.sleepNeed.value;
+    final need = learned ?? 480; // 8 h goal until OpenStrap has learned the need
 
     DateTime? bed, start;
-    if (wake != null && need != null) {
+    if (wake != null) {
       // +15 min to fall asleep, wind-down 45 min before bed.
       bed = wake.subtract(Duration(minutes: need.round() + 15));
       start = bed.subtract(const Duration(minutes: 45));
@@ -347,9 +430,7 @@ class _WindDownState extends State<_WindDown> {
       Text(
           wake == null
               ? 'Stell einen Wecker, dann rechnet OPGG die Zeiten aus deinem Schlafbedarf.'
-              : need == null
-                  ? 'Schlafbedarf ist noch unbekannt – nach ein paar Nächten erscheinen die Zeiten.'
-                  : 'Aus Weckzeit, ${hMin(need)} Schlafbedarf und 15 min Einschlafzeit.',
+              : 'Aus Weckzeit, ${hMin(need)} ${learned == null ? 'Schlafziel' : 'Schlafbedarf'} und 15 min Einschlafzeit.',
           style: O.small),
       const SizedBox(height: 18),
       for (var i = 0; i < _steps.length; i++)

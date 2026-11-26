@@ -191,6 +191,14 @@ String pad2(int n) => n.toString().padLeft(2, '0');
 String hhmm(DateTime t) => '${pad2(t.hour)}:${pad2(t.minute)}';
 const kWd = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
 String wdDm(DateTime d) => '${kWd[d.weekday - 1]} ${d.day}.${d.month}.';
+/// "heute Nacht" / "Nacht zum Mi" for a night labelled by its wake day.
+String nightLabel(DateTime wakeDay) {
+  final now = DateTime.now();
+  final isToday =
+      wakeDay.year == now.year && wakeDay.month == now.month && wakeDay.day == now.day;
+  return isToday ? 'letzte Nacht' : 'Nacht zum ${kWd[wakeDay.weekday - 1]}';
+}
+
 String hMin(num minutes) {
   final m = minutes.round();
   return m >= 60 ? '${m ~/ 60} h ${pad2(m % 60)}' : '$m min';

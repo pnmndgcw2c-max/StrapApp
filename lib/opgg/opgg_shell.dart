@@ -3,6 +3,7 @@
 // OpenStrap engine — every value is read from AppState / the repository.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../state/app_state.dart';
@@ -95,8 +96,15 @@ class _OpggShellState extends State<OpggShell> {
               _bandPop = !_bandPop;
               _menu = false;
             }),
-            onBandHold: () {
-              if (app.isPaired) app.syncNow();
+            onBandHold: () async {
+              if (!app.isPaired) return;
+              await HapticFeedback.heavyImpact();
+              try {
+                await app.syncNow();
+              } catch (_) {}
+              await HapticFeedback.mediumImpact();
+              await Future<void>.delayed(const Duration(milliseconds: 120));
+              await HapticFeedback.mediumImpact();
             },
             onSettings: () => Navigator.of(context)
                 .push(MaterialPageRoute<void>(builder: (_) => const MoreSettings())),
@@ -288,8 +296,8 @@ class _TopBar extends StatelessWidget {
                     child: Row(children: [
                       Dot(band.color),
                       const SizedBox(width: 6),
-                      const Text('Band',
-                          style: TextStyle(
+                      Text(app.syncingNow ? 'Sync …' : 'Band',
+                          style: const TextStyle(
                               fontSize: 12, fontWeight: FontWeight.w600, color: O.ink2)),
                     ]),
                   ),

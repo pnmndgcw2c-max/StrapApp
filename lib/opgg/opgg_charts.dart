@@ -43,8 +43,13 @@ class TrendCard extends StatefulWidget {
   final TrendSpec spec;
   final List<DateTime> days;
   final List<double?> values;
+  final String? emptyNote; // why there is nothing yet (e.g. baseline learning)
   const TrendCard(
-      {super.key, required this.spec, required this.days, required this.values});
+      {super.key,
+      required this.spec,
+      required this.days,
+      required this.values,
+      this.emptyNote});
   @override
   State<TrendCard> createState() => _TrendCardState();
 }
@@ -70,7 +75,7 @@ class _TrendCardState extends State<TrendCard> {
         : (avg == null ? '--' : de(avg, s.dec));
     final headSub = sel != null
         ? wdDm(widget.days[sel])
-        : (avg == null ? 'noch keine Daten' : 'Ø pro Tag');
+        : (avg == null ? (widget.emptyNote ?? 'noch keine Daten') : 'Ø pro Tag');
 
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),

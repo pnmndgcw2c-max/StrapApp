@@ -43,6 +43,7 @@ Map<String, Object?> tasksSchema() => {
       'Fokuszeit (min)': {
         'number': {'format': 'number'}
       },
+      'Erledigt am': {'date': {}},
     };
 
 Map<String, Object?> sessionsSchema(String tasksDs) => {
@@ -74,6 +75,7 @@ class OTask {
   final DateTime? due;
   final int progress; // 0–100
   final int focusMin;
+  final DateTime? doneAt; // for finished tasks (stats)
   const OTask({
     required this.id,
     required this.name,
@@ -85,7 +87,22 @@ class OTask {
     this.due,
     this.progress = 0,
     this.focusMin = 0,
+    this.doneAt,
   });
+
+  OTask copyWith({String? status, int? progress, int? focusMin, DateTime? doneAt}) => OTask(
+        id: id,
+        name: name,
+        status: status ?? this.status,
+        energy: energy,
+        effort: effort,
+        area: area,
+        url: url,
+        due: due,
+        progress: progress ?? this.progress,
+        focusMin: focusMin ?? this.focusMin,
+        doneAt: doneAt ?? this.doneAt,
+      );
 
   bool get started => status == kStatusDoing || (progress > 0 && progress < 100);
 
@@ -104,6 +121,10 @@ class OTask {
     final d = p['Fällig'];
     DateTime? due;
     if (d is Map && d['date'] is Map) due = DateTime.tryParse('${d['date']['start']}');
+    final e = p['Erledigt am'];
+    DateTime? doneAt;
+    if (e is Map && e['date'] is Map) doneAt = DateTime.tryParse('${e['date']['start']}')?.toLocal();
+    doneAt ??= DateTime.tryParse('${page['last_edited_time']}')?.toLocal();
     return OTask(
       id: '${page['id']}',
       name: NotionApi.pageTitle(page).trim().isEmpty ? 'Ohne Titel' : NotionApi.pageTitle(page),
@@ -115,6 +136,7 @@ class OTask {
       due: due,
       progress: (((_numOf(p, 'Fortschritt') ?? 0) * 100).round()).clamp(0, 100),
       focusMin: (_numOf(p, 'Fokuszeit (min)') ?? 0).round(),
+      doneAt: doneAt,
     );
   }
 
@@ -129,6 +151,7 @@ class OTask {
         'due': due?.toIso8601String(),
         'progress': progress,
         'focusMin': focusMin,
+        'doneAt': doneAt?.toIso8601String(),
       };
 
   static OTask? fromJson(Object? j) {
@@ -144,6 +167,7 @@ class OTask {
       due: j['due'] == null ? null : DateTime.tryParse('${j['due']}'),
       progress: (j['progress'] as num?)?.toInt() ?? 0,
       focusMin: (j['focusMin'] as num?)?.toInt() ?? 0,
+      doneAt: j['doneAt'] == null ? null : DateTime.tryParse('${j['doneAt']}'),
     );
   }
 }
@@ -176,10 +200,12 @@ class NotionStore extends ChangeNotifier {
   static const _kTasksDs = 'opgg_notion_tasks_ds', _kSessDs = 'opgg_notion_sessions_ds';
   static const _kTasks = 'opgg_tasks_cache', _kQueue = 'opgg_sync_queue';
   static const _kLog = 'opgg_sync_log', _kLastOk = 'opgg_sync_last_ok';
+  static const _kDone = 'opgg_tasks_done', _kDoneCol = 'opgg_notion_donecol';
 
   String? _token;
   String? pageId, pageTitle, tasksDs, sessionsDs;
   List<OTask> tasks = [];
+  List<OTask> done = []; // finished in the last ~31 days (Woche/Monat)
   List<Map<String, dynamic>> queue = [];
   List<SyncLogEntry> log = [];
   int lastOk = 0; // epoch ms of the last successful Notion sync
@@ -213,6 +239,7 @@ class NotionStore extends ChangeNotifier {
     sessionsDs = _nz(Prefs.getString(_kSessDs, ''));
     lastOk = Prefs.getInt(_kLastOk, 0);
     tasks = _list(_kTasks, OTask.fromJson);
+    done = _list(_kDone, OTask.fromJson);
     log = _list(_kLog, SyncLogEntry.fromJson);
     try {
       final q = jsonDecode(Prefs.getString(_kQueue, '[]'));
@@ -304,6 +331,7 @@ class NotionStore extends ChangeNotifier {
 
       var t = await existing(kTasksTitle);
       t ??= await api.createDatabase(page.id, kTasksTitle, '✅', tasksSchema());
+      Prefs.setBool(_kDoneCol, false); // re-check the column on next sync
       var s = await existing(kSessionsTitle);
       s ??= await api.createDatabase(page.id, kSessionsTitle, '⏱', sessionsSchema(t));
       pageId = page.id;
@@ -326,9 +354,11 @@ class NotionStore extends ChangeNotifier {
   Future<void> disconnect() async {
     await _secure.delete(key: _kToken);
     _token = null;
-    for (final k in [_kPage, _kPageTitle, _kTasksDs, _kSessDs, _kTasks]) {
+    for (final k in [_kPage, _kPageTitle, _kTasksDs, _kSessDs, _kTasks, _kDone]) {
       Prefs.setString(k, '');
     }
+    Prefs.setBool(_kDoneCol, false);
+    done = [];
     pageId = pageTitle = tasksDs = sessionsDs = null;
     tasks = [];
     _timer?.cancel();
@@ -341,33 +371,62 @@ class NotionStore extends ChangeNotifier {
     queue = [...queue, {'op': 'session', 's': s.toJson()}];
     _persistQueue();
     // Reflect progress locally right away; Notion follows on the next sync.
-    if (s.taskId != null) {
-      tasks = [
-        for (final t in tasks)
-          if (t.id == s.taskId)
-            OTask(
-              id: t.id,
-              name: t.name,
-              status: (s.progress ?? 0) >= 100 ? kStatusDone : kStatusDoing,
-              energy: t.energy,
-              effort: t.effort,
-              area: t.area,
-              url: t.url,
-              due: t.due,
-              progress: s.progress ?? t.progress,
-              focusMin: t.focusMin + (s.studiedMs / 60000).round(),
-            )
-          else
-            t
-      ];
-      tasks = [for (final t in tasks) if (t.status != kStatusDone) t];
+    final t = s.taskId == null ? null : tasks.where((x) => x.id == s.taskId).firstOrNull;
+    if (t != null) {
+      final addMin = (s.studiedMs / 60000).round();
+      if ((s.progress ?? 0) >= 100) {
+        _markDoneLocal(t, addMin: addMin);
+      } else {
+        tasks = [
+          for (final x in tasks)
+            if (x.id == t.id)
+              x.copyWith(
+                  status: kStatusDoing,
+                  progress: s.progress ?? x.progress,
+                  focusMin: x.focusMin + addMin)
+            else
+              x
+        ];
+      }
       _saveTasks();
     }
     notifyListeners();
     syncSoon();
   }
 
-  void _saveTasks() => Prefs.setString(_kTasks, jsonEncode([for (final t in tasks) t.toJson()]));
+  void _saveTasks() {
+    Prefs.setString(_kTasks, jsonEncode([for (final t in tasks) t.toJson()]));
+    Prefs.setString(_kDone, jsonEncode([for (final t in done) t.toJson()]));
+  }
+
+  /// Moves a task to [done] locally (Notion follows via the queue).
+  void _markDoneLocal(OTask t, {int addMin = 0}) {
+    tasks = [for (final x in tasks) if (x.id != t.id) x];
+    done = [
+      t.copyWith(
+          status: kStatusDone, progress: 100, focusMin: t.focusMin + addMin, doneAt: DateTime.now()),
+      for (final x in done) if (x.id != t.id) x,
+    ];
+  }
+
+  /// Progress change without a logged session (e.g. under a minute).
+  void setProgress(String taskId, int progress) {
+    final t = tasks.where((x) => x.id == taskId).firstOrNull;
+    if (t == null || t.progress == progress) return;
+    queue = [...queue, {'op': 'progress', 'id': taskId, 'p': progress}];
+    _persistQueue();
+    if (progress >= 100) {
+      _markDoneLocal(t);
+    } else {
+      tasks = [
+        for (final x in tasks)
+          if (x.id == taskId) x.copyWith(status: kStatusDoing, progress: progress) else x
+      ];
+    }
+    _saveTasks();
+    notifyListeners();
+    syncSoon();
+  }
 
   /// Creates a task directly (needs a connection). Null on success.
   Future<String?> createTask(
@@ -406,7 +465,7 @@ class NotionStore extends ChangeNotifier {
   void completeTask(OTask t) {
     queue = [...queue, {'op': 'done', 'id': t.id}];
     _persistQueue();
-    tasks = [for (final x in tasks) if (x.id != t.id) x];
+    _markDoneLocal(t);
     _saveTasks();
     notifyListeners();
     syncSoon();
@@ -421,6 +480,11 @@ class NotionStore extends ChangeNotifier {
     final api = NotionApi(_token!);
     var sent = 0;
     try {
+      // 0. databases made before 'Erledigt am' existed get the column once.
+      if (!Prefs.getBool(_kDoneCol, false)) {
+        await api.updateDataSource(tasksDs!, {'Erledigt am': {'date': {}}});
+        Prefs.setBool(_kDoneCol, true);
+      }
       // 1. push queued writes in order; a transient failure stops the run.
       while (queue.isNotEmpty) {
         final op = queue.first;
@@ -445,6 +509,21 @@ class NotionStore extends ChangeNotifier {
             {'property': 'Fällig', 'direction': 'ascending'},
           ]);
       tasks = [for (final r in rows) OTask.fromNotion(r)];
+      // 3. tasks finished in the last month (for Woche/Monat).
+      final since = DateTime.now().subtract(const Duration(days: 31));
+      final doneRows = await api.query(tasksDs!, filter: {
+        'and': [
+          {
+            'property': 'Status',
+            'select': {'equals': kStatusDone},
+          },
+          {
+            'timestamp': 'last_edited_time',
+            'last_edited_time': {'on_or_after': since.toUtc().toIso8601String()},
+          },
+        ]
+      });
+      done = [for (final r in doneRows) OTask.fromNotion(r)];
       _saveTasks();
       lastOk = DateTime.now().millisecondsSinceEpoch;
       Prefs.setInt(_kLastOk, lastOk);
@@ -492,12 +571,21 @@ class NotionStore extends ChangeNotifier {
             'Fokuszeit (min)': NotionApi.number(cur.focusMin + (s.studiedMs / 60000).round()),
             if (s.progress != null) 'Fortschritt': NotionApi.number(p / 100),
             'Status': NotionApi.select(p >= 100 ? kStatusDone : kStatusDoing),
+            if (p >= 100) 'Erledigt am': NotionApi.dateOnly(DateTime.now()),
           });
         }
       case 'done':
         await api.updatePage('${op['id']}', {
           'Status': NotionApi.select(kStatusDone),
           'Fortschritt': NotionApi.number(1),
+          'Erledigt am': NotionApi.dateOnly(DateTime.now()),
+        });
+      case 'progress':
+        final p = (op['p'] as num).toInt();
+        await api.updatePage('${op['id']}', {
+          'Fortschritt': NotionApi.number(p / 100),
+          'Status': NotionApi.select(p >= 100 ? kStatusDone : kStatusDoing),
+          if (p >= 100) 'Erledigt am': NotionApi.dateOnly(DateTime.now()),
         });
     }
   }

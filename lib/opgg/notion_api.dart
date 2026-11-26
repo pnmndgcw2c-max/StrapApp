@@ -168,6 +168,10 @@ class NotionApi {
 
   Future<Map<String, dynamic>> getPage(String pageId) => _call('GET', 'pages/$pageId');
 
+  /// Adds/changes columns on an existing data source.
+  Future<Map<String, dynamic>> updateDataSource(String id, Map<String, Object?> properties) =>
+      _call('PATCH', 'data_sources/$id', {'properties': properties});
+
   // ── property helpers ──
   static String richText(Object? rt) => rt is List
       ? rt.map((e) => e is Map ? (e['plain_text'] ?? e['text']?['content'] ?? '') : '').join()

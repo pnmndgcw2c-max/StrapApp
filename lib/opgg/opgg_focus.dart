@@ -665,9 +665,18 @@ class _FocusTodayState extends State<FocusToday> {
       if (progress == null) return; // sheet dismissed: keep running
     }
     final s = f.finish(progress: progress);
-    if (s != null && s.studiedMs >= 60000) NotionStore.instance.enqueueSession(s);
-    if (s != null && s.studiedMs < 60000 && mounted) {
-      setState(() => _note = 'Unter 1 Minute – nicht gespeichert');
+    if (s == null) return;
+    if (s.studiedMs >= 60000) {
+      NotionStore.instance.enqueueSession(s);
+    } else if (mounted) {
+      // A short session is not logged, but a changed progress still counts.
+      final n = NotionStore.instance;
+      final before = n.tasks.where((t) => t.id == s.taskId).firstOrNull?.progress;
+      final changed = s.taskId != null && progress != null && progress != before;
+      if (changed) n.setProgress(s.taskId!, progress!);
+      setState(() => _note = changed
+          ? 'Fortschritt gespeichert · Session unter 1 Minute'
+          : 'Unter 1 Minute – nicht gespeichert');
       _noteT?.cancel();
       _noteT = Timer(const Duration(seconds: 4), () {
         if (mounted) setState(() => _note = null);

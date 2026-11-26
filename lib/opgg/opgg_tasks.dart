@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'opgg_charts.dart';
+import 'opgg_focus.dart' show FocusStore;
 import 'opgg_style.dart';
 import 'opgg_sync.dart';
 
@@ -89,12 +91,7 @@ class TasksPage extends StatelessWidget {
         }
         final list = suggest(n.tasks, energy);
         final want = wantedLevel(energy);
-        return RefreshIndicator(
-          color: O.ink,
-          backgroundColor: O.pill,
-          onRefresh: () => n.sync(manual: true),
-          child: ListView(
-            physics: const AlwaysScrollableScrollPhysics(),
+        return ListView(
             padding: const EdgeInsets.fromLTRB(16, 14, 16, 100),
             children: [
               SectionHead('Offen',
@@ -121,7 +118,6 @@ class TasksPage extends StatelessWidget {
               const SizedBox(height: 16),
               OButton('+ Neue Aufgabe', primary: false, height: 48, onTap: () => _add(context)),
             ],
-          ),
         );
       },
     );
@@ -375,5 +371,106 @@ class _AddTaskState extends State<_AddTask> {
         _err = err;
       });
     }
+  }
+}
+
+// ── Woche / Monat ─────────────────────────────────────────────────────────────
+
+/// Effort points per task, and the minutes each effort roughly means.
+const _points = {'kurz': 1, 'mittel': 2, 'lang': 3};
+const _estMin = {'kurz': 20, 'mittel': 60, 'lang': 150};
+
+class TasksPeriod extends StatelessWidget {
+  final int n;
+  const TasksPeriod({super.key, required this.n});
+
+  static bool _same(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = NotionStore.instance;
+    final focus = FocusStore.instance;
+    return ListenableBuilder(
+      listenable: Listenable.merge([store, focus]),
+      builder: (context, _) {
+        final days = lastDays(n);
+        final first = days.first;
+        final done = [
+          for (final t in store.done)
+            if (t.doneAt != null && !t.doneAt!.isBefore(first)) t
+        ];
+        List<double?> perDay(double Function(List<OTask>) f) => [
+              for (final d in days)
+                () {
+                  final v = f([for (final t in done) if (_same(t.doneAt!, d)) t]);
+                  return v == 0 ? null : v;
+                }(),
+            ];
+        final count = perDay((l) => l.length.toDouble());
+        final points = perDay((l) => l.fold<double>(0, (a, t) => a + (_points[t.effort] ?? 0)));
+        final hours = [
+          for (final d in days)
+            () {
+              final ms = focus
+                  .onDay(d)
+                  .where((s) => s.taskId != null)
+                  .fold<int>(0, (a, s) => a + s.studiedMs);
+              return ms == 0 ? null : ms / 3600000;
+            }(),
+        ];
+        final total = done.length;
+        final pts = points.whereType<double>().fold<double>(0, (a, b) => a + b);
+        // Estimate vs real: only finished tasks with an effort and tracked time.
+        final rated = [for (final t in done) if (t.effort != null && t.focusMin > 0) t];
+        final est = rated.fold<int>(0, (a, t) => a + (_estMin[t.effort] ?? 0));
+        final real = rated.fold<int>(0, (a, t) => a + t.focusMin);
+        final dev = est == 0 ? null : ((real - est) / est * 100).round();
+
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
+          children: [
+            SectionHead(n == 7 ? 'Letzte 7 Tage' : 'Letzte 30 Tage',
+                hint: '${wdDm(days.first)} – ${wdDm(days.last)}'),
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(
+                  child: SumTile('Erledigt', total == 0 ? '--' : '$total',
+                      total == 0 ? 'noch keine' : '${pts.round()} Aufwandspunkte',
+                      height: 118)),
+              const SizedBox(width: 8),
+              Expanded(
+                  child: SumTile(
+                      'Schätzung vs. echt',
+                      dev == null ? '--' : '${dev >= 0 ? '+' : '−'}${dev.abs()} %',
+                      dev == null
+                          ? 'braucht erledigte Aufgaben mit Fokuszeit'
+                          : dev >= 0
+                              ? 'länger als geschätzt'
+                              : 'schneller als geschätzt',
+                      height: 118)),
+            ]),
+            const SizedBox(height: 12),
+            TrendCard(
+                spec: const TrendSpec('done', 'Erledigte Aufgaben', ''),
+                days: days,
+                values: count,
+                emptyNote: 'noch nichts erledigt'),
+            const SizedBox(height: 12),
+            TrendCard(
+                spec: const TrendSpec('points', 'Aufwandspunkte', 'P'),
+                days: days,
+                values: points,
+                emptyNote: 'kurz 1 · mittel 2 · lang 3'),
+            const SizedBox(height: 12),
+            TrendCard(
+                spec: const TrendSpec('taskh', 'Zeit an Aufgaben', 'h', dec: 1),
+                days: days,
+                values: hours,
+                emptyNote: 'noch keine Fokuszeit an Aufgaben'),
+          ],
+        );
+      },
+    );
   }
 }

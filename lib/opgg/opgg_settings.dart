@@ -13,7 +13,7 @@ import 'opgg_sync.dart';
 
 Color syncColor(SyncState s) => switch (s) {
       SyncState.off => O.grey,
-      SyncState.syncing => O.ink,
+      SyncState.syncing => O.orange,
       SyncState.ok => O.green,
       SyncState.idle => O.orange,
       SyncState.error => O.red,
@@ -80,8 +80,7 @@ class _OpggSettingsState extends State<OpggSettings> {
               _card([
                 _line(Dot(band.color), 'Band ${band.label}',
                     app.device.batteryPct == null ? null : 'Akku ${app.device.batteryPct!.round()} %'),
-                _tap('Band koppeln oder wechseln',
-                    () => _push(const RePair())),
+                _btn('Band koppeln oder wechseln', () => _push(const RePair())),
               ]),
               const SizedBox(height: 22),
               const SectionHead('Notion'),
@@ -107,7 +106,7 @@ class _OpggSettingsState extends State<OpggSettings> {
               const SectionHead('Erweitert'),
               const SizedBox(height: 10),
               _card([
-                _tap('OpenStrap-Einstellungen', () => _push(const MoreSettings())),
+                _btn('OpenStrap-Einstellungen', () => _push(const MoreSettings())),
               ]),
             ],
           );
@@ -180,8 +179,7 @@ class _OpggSettingsState extends State<OpggSettings> {
         _line(Dot(syncColor(s)), 'Verbunden mit „${n.pageTitle ?? 'OPGG'}“', syncLabel(s, n)),
         _line(const SizedBox(width: 7), 'Letzter Sync', agoLabel(n.lastOk)),
         _line(const SizedBox(width: 7), 'Offene Aufgaben', '${n.tasks.length}'),
-        _tap('Jetzt synchronisieren', () => n.sync(manual: true)),
-        _tap('Trennen', () async {
+        _btn('Jetzt synchronisieren', () => n.sync(manual: true), second: ('Trennen', () async {
           final ok = await showDialog<bool>(
             context: context,
             builder: (d) => AlertDialog(
@@ -201,7 +199,7 @@ class _OpggSettingsState extends State<OpggSettings> {
             ),
           );
           if (ok == true) await n.disconnect();
-        }, danger: true),
+        })),
       ]);
 
   void _push(Widget w) =>
@@ -231,16 +229,15 @@ class _OpggSettingsState extends State<OpggSettings> {
         ]),
       );
 
-  Widget _tap(String text, VoidCallback onTap, {bool danger = false}) => InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 13, 14, 13),
-          child: Row(children: [
-            Expanded(
-                child: Text(text,
-                    style: TextStyle(fontSize: 14, color: danger ? O.red : O.ink))),
-            if (!danger) const Icon(Icons.chevron_right, size: 18, color: O.ink3),
-          ]),
-        ),
+  /// Action row: one button, or two side by side ([second] is the quieter one).
+  Widget _btn(String text, VoidCallback onTap, {(String, VoidCallback)? second}) => Padding(
+        padding: const EdgeInsets.all(10),
+        child: Row(children: [
+          Expanded(child: OButton(text, primary: false, height: 44, onTap: onTap)),
+          if (second != null) ...[
+            const SizedBox(width: 8),
+            Expanded(child: OButton(second.$1, primary: false, height: 44, onTap: second.$2)),
+          ],
+        ]),
       );
 }

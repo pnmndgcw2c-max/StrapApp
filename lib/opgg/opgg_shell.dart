@@ -2,6 +2,8 @@
 // settings), Heute/Woche/Monat pager, and the tabs. Built on the existing
 // OpenStrap engine — every value is read from AppState / the repository.
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -21,7 +23,7 @@ import 'opgg_tasks.dart';
 
 enum OTab {
   overview('Überblick', 'Energie, Biomarker, Tag', Icons.change_history_rounded, true),
-  tasks('Aufgaben', 'aus Notion, nach Energie', Icons.check_box_outlined, false),
+  tasks('Aufgaben', 'aus Notion, nach Energie', Icons.check_box_outlined, true),
   fitness('Fitness', 'Workouts – kommt in Etappe 3', Icons.fitness_center, false),
   focus('Fokus', 'Sessions mit Pausen', Icons.timer_outlined, true),
   body('Körper', 'Körperwerte – kommt in Etappe 3', Icons.monitor_weight_outlined, false),
@@ -48,6 +50,7 @@ class _OpggShellState extends State<OpggShell> {
   bool _bandPop = false;
   bool _syncPop = false;
   int _bandLogAt = 0;
+  bool _holdSync = false, _holdBand = false; // orange while a held sync runs
   Future<OpggDay>? _data;
   int? _syncKey;
 
@@ -106,6 +109,18 @@ class _OpggShellState extends State<OpggShell> {
         _ => O.green,
       };
 
+  /// Hold-to-sync: buzz, show orange for at least a second, buzz twice when done.
+  Future<void> _held(Future<void> Function() work, void Function(bool) flag) async {
+    await HapticFeedback.heavyImpact();
+    setState(() => flag(true));
+    await Future.wait([work(), Future<void>.delayed(const Duration(milliseconds: 1000))]);
+    if (!mounted) return;
+    setState(() => flag(false));
+    await HapticFeedback.mediumImpact();
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    await HapticFeedback.mediumImpact();
+  }
+
   void _goPage(int i) {
     setState(() => _page = i);
     if (_pager.hasClients) {
@@ -142,6 +157,8 @@ class _OpggShellState extends State<OpggShell> {
             tab: _tab,
             app: app,
             sync: _notion.state,
+            holdSync: _holdSync,
+            holdBand: _holdBand,
             onMenu: () => setState(() {
               final v = !_menu;
               _closePops();
@@ -157,28 +174,20 @@ class _OpggShellState extends State<OpggShell> {
               _closePops();
               _syncPop = v;
             }),
-            onSyncHold: () async {
-              await HapticFeedback.heavyImpact();
-              if (app.isPaired) {
-                try {
-                  await app.syncNow();
-                } catch (_) {}
-              }
-              await _notion.sync(manual: true);
-              await HapticFeedback.mediumImpact();
-              await Future<void>.delayed(const Duration(milliseconds: 120));
-              await HapticFeedback.mediumImpact();
-            },
-            onBandHold: () async {
-              if (!app.isPaired) return;
-              await HapticFeedback.heavyImpact();
-              try {
-                await app.syncNow();
-              } catch (_) {}
-              await HapticFeedback.mediumImpact();
-              await Future<void>.delayed(const Duration(milliseconds: 120));
-              await HapticFeedback.mediumImpact();
-            },
+            onSyncHold: () => _held(() async {
+                  if (app.isPaired) {
+                    try {
+                      await app.syncNow();
+                    } catch (_) {}
+                  }
+                  await _notion.sync(manual: true);
+                }, (v) => _holdSync = v),
+            onBandHold: () => _held(() async {
+                  if (!app.isPaired) return;
+                  try {
+                    await app.syncNow();
+                  } catch (_) {}
+                }, (v) => _holdBand = v),
             onSettings: _settings,
             pages: pages,
             page: _page,
@@ -232,7 +241,10 @@ class _OpggShellState extends State<OpggShell> {
       case OTab.overview:
       case OTab.sleep:
       case OTab.focus:
+      case OTab.tasks:
         final Widget today = switch (_tab) {
+          OTab.tasks => TasksPage(
+              energy: Energy.of(d).total, onStart: _startTask, onSettings: _settings),
           OTab.overview =>
             OverviewToday(day: d, onStart: _startTask, onTasks: () => _go(OTab.tasks)),
           OTab.sleep => SleepToday(day: d),
@@ -247,6 +259,7 @@ class _OpggShellState extends State<OpggShell> {
               switch (_tab) {
                 OTab.overview => OverviewPeriod(day: d, n: n),
                 OTab.sleep => SleepPeriod(day: d, n: n),
+                OTab.tasks => TasksPeriod(n: n),
                 _ => FocusPeriod(n: n),
               },
           ],
@@ -269,15 +282,12 @@ class _OpggShellState extends State<OpggShell> {
           onAction: () => Navigator.of(context).push(MaterialPageRoute<void>(
               builder: (_) => const Scaffold(body: SafeArea(child: HealthScreen())))),
         );
-      case OTab.tasks:
-        return TasksPage(
-            energy: Energy.of(d).total, onStart: _startTask, onSettings: _settings);
     }
   }
 }
 
 /// Rounded header button with the same border everywhere.
-class _Pill extends StatelessWidget {
+class _Pill extends StatefulWidget {
   final List<Widget> children;
   final VoidCallback? onTap, onLongPress;
   final double height;
@@ -289,18 +299,46 @@ class _Pill extends StatelessWidget {
       this.height = 30,
       this.padding = const EdgeInsets.symmetric(horizontal: 10)});
   @override
+  State<_Pill> createState() => _PillState();
+}
+
+class _PillState extends State<_Pill> with SingleTickerProviderStateMixin {
+  // A short damped wiggle as visual confirmation of a long press.
+  late final AnimationController _w =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 520));
+
+  @override
+  void dispose() {
+    _w.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) => GestureDetector(
-        onTap: onTap,
-        onLongPress: onLongPress,
-        child: Container(
-          height: height,
-          padding: padding,
-          decoration: BoxDecoration(
-            color: O.pill,
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: O.line),
+        onTap: widget.onTap,
+        onLongPress: widget.onLongPress == null
+            ? null
+            : () {
+                _w.forward(from: 0);
+                widget.onLongPress!();
+              },
+        child: AnimatedBuilder(
+          animation: _w,
+          builder: (context, child) {
+            final t = _w.value;
+            return Transform.rotate(
+                angle: math.sin(t * math.pi * 6) * 0.09 * (1 - t), child: child);
+          },
+          child: Container(
+            height: widget.height,
+            padding: widget.padding,
+            decoration: BoxDecoration(
+              color: O.pill,
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: O.line),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: widget.children),
           ),
-          child: Row(mainAxisSize: MainAxisSize.min, children: children),
         ),
       );
 }
@@ -309,7 +347,7 @@ class _Pill extends StatelessWidget {
 
 ({Color color, String label}) bandState(AppState app) {
   if (!app.isPaired) return (color: O.grey, label: 'kein Band');
-  if (app.syncingNow) return (color: O.ink, label: 'synchronisiert');
+  if (app.syncingNow) return (color: O.orange, label: 'synchronisiert gerade');
   return switch (app.device.connection) {
     'connected' => ((app.device.batteryPct ?? 100) < 20)
         ? (color: O.orange, label: 'Akku fast leer')
@@ -324,6 +362,7 @@ class _TopBar extends StatelessWidget {
   final AppState app;
   final VoidCallback onMenu, onBand, onBandHold, onSettings, onSync, onSyncHold;
   final SyncState sync;
+  final bool holdSync, holdBand;
   final List<String> pages;
   final int page;
   final ValueChanged<int> onPage;
@@ -338,6 +377,8 @@ class _TopBar extends StatelessWidget {
     required this.onSync,
     required this.onSyncHold,
     required this.sync,
+    required this.holdSync,
+    required this.holdBand,
     required this.onSettings,
     required this.pages,
     required this.page,
@@ -391,10 +432,10 @@ class _TopBar extends StatelessWidget {
                   onTap: onSync,
                   onLongPress: onSyncHold,
                   children: [
-                    Dot(syncColor(sync)),
+                    Dot(holdSync ? O.orange : syncColor(sync)),
                     const SizedBox(width: 6),
-                    Text(sync == SyncState.syncing ? 'Sync …' : 'Sync',
-                        style: const TextStyle(
+                    const Text('Sync',
+                        style: TextStyle(
                             fontSize: 12, fontWeight: FontWeight.w600, color: O.ink2)),
                   ],
                 ),
@@ -403,10 +444,10 @@ class _TopBar extends StatelessWidget {
                   onTap: onBand,
                   onLongPress: onBandHold,
                   children: [
-                    Dot(band.color),
+                    Dot(holdBand ? O.orange : band.color),
                     const SizedBox(width: 6),
-                    Text(app.syncingNow ? 'Band …' : 'Band',
-                        style: const TextStyle(
+                    const Text('Band',
+                        style: TextStyle(
                             fontSize: 12, fontWeight: FontWeight.w600, color: O.ink2)),
                   ],
                 ),
@@ -459,37 +500,38 @@ class _TabMenu extends StatelessWidget {
           padding: const EdgeInsets.all(6),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             for (final t in OTab.values)
-              InkWell(
-                borderRadius: BorderRadius.circular(10),
-                onTap: () => onPick(t),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                  child: Row(children: [
-                    Container(
-                      width: 32,
-                      height: 32,
-                      decoration: BoxDecoration(
-                          color: const Color(0xFF3E3E42),
-                          borderRadius: BorderRadius.circular(9)),
-                      child: Icon(t.icon, size: 17, color: O.ink),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text(t.label, style: O.body),
-                        Text(t.hint, style: O.small),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 1),
+                child: Material(
+                  color: t == current ? const Color(0xFF232326) : Colors.transparent,
+                  borderRadius: BorderRadius.circular(10),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(10),
+                    onTap: () => onPick(t),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                      child: Row(children: [
+                        Container(
+                          width: 32,
+                          height: 32,
+                          decoration: BoxDecoration(
+                              color: const Color(0xFF3E3E42),
+                              borderRadius: BorderRadius.circular(9)),
+                          child: Icon(t.icon, size: 17, color: O.ink),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Text(t.label, style: O.body),
+                            Text(t.hint, style: O.small),
+                          ]),
+                        ),
+                        if (t == OTab.tasks && tasksOpen) const Dot(O.orange),
+                        if (t == OTab.focus && focus != FPhase.idle)
+                          Dot(focus == FPhase.running ? O.green : O.orange),
                       ]),
                     ),
-                    if (t == OTab.tasks && tasksOpen) ...[
-                      const Dot(O.orange),
-                      const SizedBox(width: 8),
-                    ],
-                    if (t == OTab.focus && focus != FPhase.idle) ...[
-                      Dot(focus == FPhase.running ? O.green : O.orange),
-                      const SizedBox(width: 8),
-                    ],
-                    if (t == current) const Icon(Icons.check, size: 16, color: O.ink),
-                  ]),
+                  ),
                 ),
               ),
           ]),

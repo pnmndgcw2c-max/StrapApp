@@ -11,6 +11,9 @@ concurrency:
   group: ios-build-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write   # draft release per build (private: drafts are only visible to the owner)
+
 jobs:
   ios:
     # Same image upstream uses (Xcode 27.x). If GitHub does not hand it out
@@ -61,3 +64,17 @@ jobs:
           name: OPGG-ipa
           path: build/ios/iphoneos/OPGG-unsigned.ipa
           retention-days: 14
+
+      # Keep every build as a DRAFT release (not public) so it can be archived
+      # on Jonas' laptop with its build number and commit.
+      - name: Archive build as draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=${{ github.run_number }}
+          sha=$(git rev-parse --short HEAD)
+          f="OPGG-b${n}-${sha}.ipa"
+          cp build/ios/iphoneos/OPGG-unsigned.ipa "$f"
+          git log -1 --format=%B | sed '/^Co-Authored-By/d;/^Claude-Session/d' > notes.txt
+          gh release create "opgg-b${n}" "$f" --draft --target "${{ github.sha }}" \
+            --title "OPGG Build ${n} (${sha})" --notes-file notes.txt

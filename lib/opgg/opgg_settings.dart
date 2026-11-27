@@ -58,22 +58,14 @@ class _OpggSettingsState extends State<OpggSettings> {
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
     final band = widget.bandState(app);
-    return Scaffold(
-      backgroundColor: O.bg,
-      appBar: AppBar(
-        backgroundColor: O.bg,
-        foregroundColor: O.ink,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        title: const Text('Einstellungen', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-      ),
-      body: ListenableBuilder(
+    // Shown in place of the tab content (mockup), not as its own page.
+    return ListenableBuilder(
         listenable: NotionStore.instance,
         builder: (context, _) {
           final n = NotionStore.instance;
           final s = n.state;
           return ListView(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 40),
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
             children: [
               const SectionHead('Band'),
               const SizedBox(height: 10),
@@ -111,7 +103,6 @@ class _OpggSettingsState extends State<OpggSettings> {
             ],
           );
         },
-      ),
     );
   }
 

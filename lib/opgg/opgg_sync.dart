@@ -201,6 +201,18 @@ class NotionStore extends ChangeNotifier {
   static const _kTasks = 'opgg_tasks_cache', _kQueue = 'opgg_sync_queue';
   static const _kLog = 'opgg_sync_log', _kLastOk = 'opgg_sync_last_ok';
   static const _kDone = 'opgg_tasks_done', _kDoneCol = 'opgg_notion_donecol';
+  static const _kSessPages = 'opgg_session_pages';
+  Map<String, String> _sessionPages = {};
+
+  /// Notion link of a logged session, once it has been uploaded.
+  String? sessionUrl(String sessionId) {
+    final id = _sessionPages[sessionId];
+    return id == null ? null : 'https://www.notion.so/${id.replaceAll('-', '')}';
+  }
+
+  /// True while the session still waits in the queue.
+  bool sessionPending(String sessionId) => queue.any(
+      (o) => o['op'] == 'session' && o['s'] is Map && '${(o['s'] as Map)['id']}' == sessionId);
 
   String? _token;
   String? pageId, pageTitle, tasksDs, sessionsDs;
@@ -240,6 +252,10 @@ class NotionStore extends ChangeNotifier {
     lastOk = Prefs.getInt(_kLastOk, 0);
     tasks = _list(_kTasks, OTask.fromJson);
     done = _list(_kDone, OTask.fromJson);
+    try {
+      final m = jsonDecode(Prefs.getString(_kSessPages, '{}'));
+      if (m is Map) _sessionPages = {for (final e in m.entries) '${e.key}': '${e.value}'};
+    } catch (_) {}
     log = _list(_kLog, SyncLogEntry.fromJson);
     try {
       final q = jsonDecode(Prefs.getString(_kQueue, '[]'));
@@ -277,13 +293,14 @@ class NotionStore extends ChangeNotifier {
     _timer?.cancel();
     _life ??= AppLifecycleListener(onResume: () => syncSoon());
     if (!configured) return;
-    _timer = Timer.periodic(const Duration(minutes: 5), (_) => sync());
+    _timer = Timer.periodic(const Duration(minutes: 15), (_) => sync());
     syncSoon();
   }
 
   void syncSoon() {
     _soon?.cancel();
-    _soon = Timer(const Duration(seconds: 2), () => sync());
+    final wait = _heldUntil - DateTime.now().millisecondsSinceEpoch;
+    _soon = Timer(Duration(milliseconds: wait > 0 ? wait + 300 : 2000), () => sync());
   }
 
   void _persistQueue() => Prefs.setString(_kQueue, jsonEncode(queue));
@@ -367,9 +384,37 @@ class NotionStore extends ChangeNotifier {
 
   // ── writes (queued) ──
 
-  void enqueueSession(FocusSession s) {
-    queue = [...queue, {'op': 'session', 's': s.toJson()}];
+  /// How long a fresh write waits before it goes to Notion, so the
+  /// "Rückgängig" in the toast can still take it back.
+  static const kUndoWindow = Duration(seconds: 10);
+
+  /// Queues [op] (held for the undo window) and returns its id.
+  String _enqueue(Map<String, dynamic> op) {
+    final uid = '${DateTime.now().microsecondsSinceEpoch}';
+    final nb = DateTime.now().add(kUndoWindow).millisecondsSinceEpoch;
+    queue = [...queue, {...op, 'uid': uid, 'nb': nb}];
     _persistQueue();
+    return uid;
+  }
+
+  /// Local task lists before a change — what an undo restores.
+  ({List<OTask> tasks, List<OTask> done}) snapshot() => (tasks: [...tasks], done: [...done]);
+
+  /// Takes back a still-held write and restores the task lists.
+  void undo(String uid, ({List<OTask> tasks, List<OTask> done}) snap) {
+    queue = [for (final o in queue) if (o['uid'] != uid) o];
+    _persistQueue();
+    tasks = snap.tasks;
+    done = snap.done;
+    _saveTasks();
+    notifyListeners();
+  }
+
+  int get _heldUntil => queue.fold<int>(
+      0, (a, o) => ((o['nb'] as num?)?.toInt() ?? 0) > a ? (o['nb'] as num).toInt() : a);
+
+  String enqueueSession(FocusSession s) {
+    final uid = _enqueue({'op': 'session', 's': s.toJson()});
     // Reflect progress locally right away; Notion follows on the next sync.
     final t = s.taskId == null ? null : tasks.where((x) => x.id == s.taskId).firstOrNull;
     if (t != null) {
@@ -392,6 +437,7 @@ class NotionStore extends ChangeNotifier {
     }
     notifyListeners();
     syncSoon();
+    return uid;
   }
 
   void _saveTasks() {
@@ -410,11 +456,10 @@ class NotionStore extends ChangeNotifier {
   }
 
   /// Progress change without a logged session (e.g. under a minute).
-  void setProgress(String taskId, int progress) {
+  String? setProgress(String taskId, int progress) {
     final t = tasks.where((x) => x.id == taskId).firstOrNull;
-    if (t == null || t.progress == progress) return;
-    queue = [...queue, {'op': 'progress', 'id': taskId, 'p': progress}];
-    _persistQueue();
+    if (t == null || t.progress == progress) return null;
+    final uid = _enqueue({'op': 'progress', 'id': taskId, 'p': progress});
     if (progress >= 100) {
       _markDoneLocal(t);
     } else {
@@ -426,12 +471,13 @@ class NotionStore extends ChangeNotifier {
     _saveTasks();
     notifyListeners();
     syncSoon();
+    return uid;
   }
 
-  /// Creates a task directly (needs a connection). Null on success.
-  Future<String?> createTask(
+  /// Creates a task directly (needs a connection).
+  Future<({String? id, String? err})> createTask(
       {required String name, String? energy, String? effort, String? area, DateTime? due}) async {
-    if (!configured) return 'Notion ist nicht verbunden';
+    if (!configured) return (id: null, err: 'Notion ist nicht verbunden');
     try {
       final id = await NotionApi(_token!).createPage(tasksDs!, {
         'Name': NotionApi.title(name),
@@ -454,27 +500,47 @@ class NotionStore extends ChangeNotifier {
       ];
       _saveTasks();
       addLog('Notion', true, 'Aufgabe angelegt: $name');
-      return null;
+      notifyListeners();
+      return (id: id, err: null);
     } on NotionError catch (e) {
       addLog('Notion', false, 'Aufgabe anlegen: ${e.human}');
-      return e.human;
+      return (id: null, err: e.human);
+    }
+  }
+
+  /// Undo of [createTask]: moves the page to Notion's trash.
+  Future<void> trashTask(String id) async {
+    tasks = [for (final t in tasks) if (t.id != id) t];
+    _saveTasks();
+    notifyListeners();
+    try {
+      await NotionApi(_token!).trashPage(id);
+      addLog('Notion', true, 'Aufgabe zurückgenommen');
+    } on NotionError catch (e) {
+      addLog('Notion', false, 'Zurücknehmen: ${e.human}');
     }
   }
 
   /// Marks a task done right away (queued if offline).
-  void completeTask(OTask t) {
-    queue = [...queue, {'op': 'done', 'id': t.id}];
-    _persistQueue();
+  String completeTask(OTask t) {
+    final uid = _enqueue({'op': 'done', 'id': t.id});
     _markDoneLocal(t);
     _saveTasks();
     notifyListeners();
     syncSoon();
+    return uid;
   }
 
   // ── sync ──
 
   Future<void> sync({bool manual = false}) async {
     if (!configured || syncing) return;
+    // A write still in its undo window: wait for it rather than pulling a
+    // task list that would undo the local change.
+    if (_heldUntil > DateTime.now().millisecondsSinceEpoch) {
+      syncSoon();
+      return;
+    }
     syncing = true;
     notifyListeners();
     final api = NotionApi(_token!);
@@ -554,7 +620,7 @@ class NotionStore extends ChangeNotifier {
         final taskId = s.taskId;
         // Notion only knows real task ids (UUIDs).
         final linked = taskId != null && !taskId.startsWith('local');
-        await api.createPage(sessionsDs!, {
+        final pid = await api.createPage(sessionsDs!, {
           'Name': NotionApi.title(s.label),
           'Zeit': NotionApi.date(start, end),
           'Dauer (min)': NotionApi.number((s.studiedMs / 60000).round()),
@@ -562,6 +628,8 @@ class NotionStore extends ChangeNotifier {
           if (linked) 'Aufgabe': NotionApi.relation([taskId]),
           if (s.progress != null) 'Fortschritt': NotionApi.number(s.progress! / 100),
         });
+        _sessionPages[s.id] = pid;
+        Prefs.setString(_kSessPages, jsonEncode(_sessionPages));
         if (linked) {
           // Add the minutes onto what Notion has now (not our cached copy).
           final page = await api.getPage(taskId);

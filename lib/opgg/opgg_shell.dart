@@ -6,6 +6,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:provider/provider.dart';
 
 import '../state/app_state.dart';
@@ -20,6 +21,7 @@ import 'opgg_settings.dart';
 import 'opgg_style.dart';
 import 'opgg_sync.dart';
 import 'opgg_tasks.dart';
+import 'opgg_toast.dart';
 
 enum OTab {
   overview('Überblick', 'Energie, Biomarker, Tag', Icons.change_history_rounded, true),
@@ -34,6 +36,36 @@ enum OTab {
   final String hint;
   final IconData icon;
   final bool hasTrend;
+}
+
+/// Tab symbols from the mockup (24×24 SVG, white).
+const _kGlyphs = {
+  'overview':
+      '<svg viewBox="0 0 24 24"><path d="M12 4 L20.5 18.5 H3.5 Z" fill="#f4f4f5" stroke="#f4f4f5" stroke-width="1.5" stroke-linejoin="round"/></svg>',
+  'tasks':
+      '<svg viewBox="0 0 24 24" fill="none" stroke="#f4f4f5" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg>',
+  'fitness':
+      '<svg viewBox="0 0 24 24" fill="none" stroke="#f4f4f5" stroke-width="2.4" stroke-linecap="round"><path d="M6.5 6.5v11M17.5 6.5v11M3.5 9.5v5M20.5 9.5v5M6.5 12h11"/></svg>',
+  'focus':
+      '<svg viewBox="0 0 24 24" fill="none" stroke="#f4f4f5" stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="13.5" r="7"/><path d="M12 10v3.5l2.5 1.5M10 3h4"/></svg>',
+  'body':
+      '<svg viewBox="0 0 24 24" fill="none" stroke="#f4f4f5" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 10.5a5 5 0 0 1 7 0M12 10.5l1.5-2"/></svg>',
+  'sleep':
+      '<svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="#f4f4f5"/></svg>',
+  'settings':
+      '<svg viewBox="0 0 24 24" fill="none" stroke="#f4f4f5" stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg>',
+};
+
+class Glyph extends StatelessWidget {
+  final String id;
+  final double size;
+  final Color? color;
+  const Glyph(this.id, {super.key, this.size = 16, this.color});
+  @override
+  Widget build(BuildContext context) => SvgPicture.string(_kGlyphs[id]!,
+      width: size,
+      height: size,
+      colorFilter: color == null ? null : ColorFilter.mode(color!, BlendMode.srcIn));
 }
 
 class OpggShell extends StatefulWidget {
@@ -51,6 +83,7 @@ class _OpggShellState extends State<OpggShell> {
   bool _syncPop = false;
   int _bandLogAt = 0;
   bool _holdSync = false, _holdBand = false; // orange while a held sync runs
+  bool _set = false; // settings open in place of the tab (mockup)
   Future<OpggDay>? _data;
   int? _syncKey;
 
@@ -81,6 +114,7 @@ class _OpggShellState extends State<OpggShell> {
   void _go(OTab t) {
     setState(() {
       _tab = t;
+      _set = false;
       _menu = false;
       _page = 0;
     });
@@ -93,8 +127,10 @@ class _OpggShellState extends State<OpggShell> {
     _syncPop = false;
   }
 
-  void _settings() => Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => const OpggSettings(bandState: bandState)));
+  void _settings() => setState(() {
+        _closePops();
+        _set = !_set;
+      });
 
   void _startTask(OTask t) {
     HapticFeedback.mediumImpact();
@@ -146,7 +182,9 @@ class _OpggShellState extends State<OpggShell> {
       _data = loadOpggDay(app.repo);
     }
 
-    final pages = _tab.hasTrend ? const ['Heute', 'Woche', 'Monat'] : const <String>[];
+    final pages =
+        _tab.hasTrend && !_set ? const ['Heute', 'Woche', 'Monat'] : const <String>[];
+    final top = MediaQuery.of(context).padding.top + 48 + (pages.isEmpty ? 0 : 44);
 
     return Scaffold(
       backgroundColor: O.bg,
@@ -155,6 +193,7 @@ class _OpggShellState extends State<OpggShell> {
           _TopBar(
             dot: _tabDot(),
             tab: _tab,
+            settingsOpen: _set,
             app: app,
             sync: _notion.state,
             holdSync: _holdSync,
@@ -198,6 +237,7 @@ class _OpggShellState extends State<OpggShell> {
               future: _data,
               builder: (c, snap) {
                 final d = snap.data;
+                if (_set) return const OpggSettings(bandState: bandState);
                 if (d == null) {
                   return const Center(
                       child: CircularProgressIndicator(color: O.ink3, strokeWidth: 2));
@@ -207,6 +247,22 @@ class _OpggShellState extends State<OpggShell> {
             ),
           ),
         ]),
+        if (_focus.reminderDue)
+          Positioned(
+            top: top + 8,
+            left: 12,
+            right: 12,
+            child: PauseNudge(
+              text: '${hMin(_focus.sinceResume / 60000)} am Stück'
+                  '${_focus.taskTitle == null ? '' : ' · ${_focus.taskTitle}'}',
+              onPause: () {
+                _focus.dismissReminder();
+                _focus.primary();
+              },
+              onDismiss: _focus.dismissReminder,
+            ),
+          ),
+        ToastBar(dot: syncColor(_notion.state)),
         if (_menu || _bandPop || _syncPop)
           Positioned.fill(
             child: GestureDetector(
@@ -362,7 +418,7 @@ class _TopBar extends StatelessWidget {
   final AppState app;
   final VoidCallback onMenu, onBand, onBandHold, onSettings, onSync, onSyncHold;
   final SyncState sync;
-  final bool holdSync, holdBand;
+  final bool holdSync, holdBand, settingsOpen;
   final List<String> pages;
   final int page;
   final ValueChanged<int> onPage;
@@ -377,6 +433,7 @@ class _TopBar extends StatelessWidget {
     required this.onSync,
     required this.onSyncHold,
     required this.sync,
+    required this.settingsOpen,
     required this.holdSync,
     required this.holdBand,
     required this.onSettings,
@@ -411,7 +468,8 @@ class _TopBar extends StatelessWidget {
                         colors: [Color(0xFF424246), O.raised2]),
                     borderRadius: BorderRadius.circular(7),
                   ),
-                  child: Icon(tab.icon, size: 16, color: O.ink),
+                  alignment: Alignment.center,
+                  child: Glyph(settingsOpen ? 'settings' : tab.name),
                 ),
                 const SizedBox(width: 8),
                 _Pill(
@@ -419,7 +477,7 @@ class _TopBar extends StatelessWidget {
                   height: 34,
                   padding: const EdgeInsets.fromLTRB(14, 0, 12, 0),
                   children: [
-                    Text(tab.label,
+                    Text(settingsOpen ? 'Einstellungen' : tab.label,
                         style: const TextStyle(
                             fontSize: 14, fontWeight: FontWeight.w600, color: O.ink)),
                     const SizedBox(width: 8),
@@ -428,18 +486,6 @@ class _TopBar extends StatelessWidget {
                   ],
                 ),
                 const Spacer(),
-                _Pill(
-                  onTap: onSync,
-                  onLongPress: onSyncHold,
-                  children: [
-                    Dot(holdSync ? O.orange : syncColor(sync)),
-                    const SizedBox(width: 6),
-                    const Text('Sync',
-                        style: TextStyle(
-                            fontSize: 12, fontWeight: FontWeight.w600, color: O.ink2)),
-                  ],
-                ),
-                const SizedBox(width: 6),
                 _Pill(
                   onTap: onBand,
                   onLongPress: onBandHold,
@@ -452,6 +498,18 @@ class _TopBar extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(width: 6),
+                _Pill(
+                  onTap: onSync,
+                  onLongPress: onSyncHold,
+                  children: [
+                    Dot(holdSync ? O.orange : syncColor(sync)),
+                    const SizedBox(width: 6),
+                    const Text('Sync',
+                        style: TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.w600, color: O.ink2)),
+                  ],
+                ),
+                const SizedBox(width: 6),
                 SizedBox(
                   width: 40,
                   height: 40,
@@ -459,9 +517,9 @@ class _TopBar extends StatelessWidget {
                     onPressed: onSettings,
                     tooltip: 'Einstellungen',
                     style: IconButton.styleFrom(
-                        backgroundColor: O.pill,
-                        side: const BorderSide(color: O.line)),
-                    icon: const Icon(Icons.settings_outlined, size: 18, color: O.ink2),
+                        backgroundColor: settingsOpen ? O.ink : O.pill,
+                        side: BorderSide(color: settingsOpen ? O.ink : O.line)),
+                    icon: Glyph('settings', size: 17, color: settingsOpen ? O.bg : O.ink2),
                   ),
                 ),
               ]),
@@ -517,7 +575,8 @@ class _TabMenu extends StatelessWidget {
                           decoration: BoxDecoration(
                               color: const Color(0xFF3E3E42),
                               borderRadius: BorderRadius.circular(9)),
-                          child: Icon(t.icon, size: 17, color: O.ink),
+                          alignment: Alignment.center,
+                          child: Glyph(t.name, size: 17),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
@@ -553,7 +612,7 @@ class _BandPopover extends StatelessWidget {
     final hr = app.liveHr;
     return Positioned(
       top: top,
-      right: 56,
+      right: 110,
       width: 240,
       child: Material(
         color: O.pill,
@@ -603,7 +662,7 @@ class _SyncPopover extends StatelessWidget {
     final top = MediaQuery.of(context).padding.top + 44;
     return Positioned(
       top: top,
-      right: 110,
+      right: 56,
       width: 240,
       child: Material(
         color: O.pill,
@@ -624,7 +683,7 @@ class _SyncPopover extends StatelessWidget {
             Text('Letzter Sync ${agoLabel(n.lastOk)} · ${n.queue.length} ausstehend',
                 style: const TextStyle(fontSize: 12, color: O.ink2)),
             const SizedBox(height: 8),
-            const Text('Gedrückt halten: Band und Notion jetzt abgleichen',
+            const Text('Gedrückt halten: Band und Notion jetzt abgleichen · automatisch alle 15 min',
                 style: TextStyle(fontSize: 11, color: O.ink3)),
           ]),
         ),

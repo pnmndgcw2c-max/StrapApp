@@ -12,6 +12,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../data/db.dart' show LocalDb;
 import '../state/app_state.dart';
@@ -19,6 +20,7 @@ import '../state/prefs.dart';
 import 'opgg_charts.dart';
 import 'opgg_style.dart';
 import 'opgg_sync.dart' show NotionStore;
+import 'opgg_toast.dart';
 
 // ── model ────────────────────────────────────────────────────────────────────
 
@@ -118,44 +120,84 @@ class FocusStore extends ChangeNotifier {
     }
     try {
       final r = Prefs.getString(_kRun, '');
-      if (r.isNotEmpty) {
-        final j = jsonDecode(r) as Map;
-        phase = j['phase'] == 'paused' ? FPhase.paused : FPhase.running;
-        type = j['type'] == 'work' ? 'work' : 'learn';
-        startedAt = (j['startedAt'] as num).toInt();
-        lastResume = (j['lastResume'] as num).toInt();
-        studyMs = (j['studyMs'] as num).toInt();
-        breakMs = (j['breakMs'] as num).toInt();
-        breaks = (j['breaks'] as num).toInt();
-        pauseStart = (j['pauseStart'] as num?)?.toInt();
-        taskId = j['taskId'] as String?;
-        taskTitle = j['taskTitle'] as String?;
-        _buzzedBlock = (j['buzzed'] as num?)?.toInt() ?? 0;
-      }
+      if (r.isNotEmpty) _applyRun(jsonDecode(r) as Map);
     } catch (_) {
       phase = FPhase.idle;
     }
+    try {
+      final h = jsonDecode(Prefs.getString(_kHr, '{}'));
+      if (h is Map) _hr.addAll({for (final e in h.entries) '${e.key}': (e.value as num).toInt()});
+    } catch (_) {}
     _arm();
   }
 
+  void _applyRun(Map j) {
+    phase = j['phase'] == 'paused' ? FPhase.paused : FPhase.running;
+    type = j['type'] == 'work' ? 'work' : 'learn';
+    startedAt = (j['startedAt'] as num).toInt();
+    lastResume = (j['lastResume'] as num).toInt();
+    studyMs = (j['studyMs'] as num).toInt();
+    breakMs = (j['breakMs'] as num).toInt();
+    breaks = (j['breaks'] as num).toInt();
+    pauseStart = (j['pauseStart'] as num?)?.toInt();
+    taskId = j['taskId'] as String?;
+    taskTitle = j['taskTitle'] as String?;
+    _buzzedBlock = (j['buzzed'] as num?)?.toInt() ?? 0;
+  }
+
+  Map<String, Object?> _runJson() => {
+        'phase': phase.name,
+        'type': type,
+        'startedAt': startedAt,
+        'lastResume': lastResume,
+        'studyMs': studyMs,
+        'breakMs': breakMs,
+        'breaks': breaks,
+        'pauseStart': pauseStart,
+        'taskId': taskId,
+        'taskTitle': taskTitle,
+        'buzzed': _buzzedBlock,
+      };
+
+  /// The running session as it is now — what "Rückgängig" brings back.
+  Map<String, Object?>? snapshotRun() => phase == FPhase.idle ? null : _runJson();
+
+  /// Undo of [finish]: the session runs on (or stays paused) and its log
+  /// entry is removed again.
+  void restore(Map<String, Object?>? run, String? loggedId) {
+    if (loggedId != null) {
+      log = [for (final x in log) if (x.id != loggedId) x];
+      _saveLog();
+    }
+    if (run != null) _applyRun(run);
+    _saveRun();
+    _arm();
+    notifyListeners();
+  }
+
+  // ── average HR of a session, from the band's synced 1 Hz data ──
+  static const _kHr = 'opgg_focus_hr';
+  final _hr = <String, int>{};
+
+  /// Null until the band has synced at least a minute of the session.
+  Future<int?> avgHr(FocusSession s) async {
+    final c = _hr[s.id];
+    if (c != null) return c;
+    try {
+      final rows = await LocalDb.hrSamplesInRange(s.start ~/ 1000, s.end ~/ 1000);
+      if (rows.length < 60) return null;
+      final sum = rows.fold<num>(0, (a, r) => a + ((r['hr'] as num?) ?? 0));
+      final v = (sum / rows.length).round();
+      _hr[s.id] = v;
+      Prefs.setString(_kHr, jsonEncode(_hr));
+      return v;
+    } catch (_) {
+      return null;
+    }
+  }
+
   void _saveRun() {
-    Prefs.setString(
-        _kRun,
-        phase == FPhase.idle
-            ? ''
-            : jsonEncode({
-                'phase': phase.name,
-                'type': type,
-                'startedAt': startedAt,
-                'lastResume': lastResume,
-                'studyMs': studyMs,
-                'breakMs': breakMs,
-                'breaks': breaks,
-                'pauseStart': pauseStart,
-                'taskId': taskId,
-                'taskTitle': taskTitle,
-                'buzzed': _buzzedBlock,
-              }));
+    Prefs.setString(_kRun, phase == FPhase.idle ? '' : jsonEncode(_runJson()));
   }
 
   void _saveLog() {
@@ -353,8 +395,6 @@ class _FocusTodayState extends State<FocusToday> {
   Timer? _tick;
   AppState? _app;
   bool _menu = false;
-  String? _note;
-  Timer? _noteT;
 
   @override
   void initState() {
@@ -369,7 +409,6 @@ class _FocusTodayState extends State<FocusToday> {
   @override
   void dispose() {
     _tick?.cancel();
-    _noteT?.cancel();
     _app?.releaseLiveHrView();
     super.dispose();
   }
@@ -425,17 +464,6 @@ class _FocusTodayState extends State<FocusToday> {
           ListView(
             padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
             children: [
-              if (f.reminderDue) ...[
-                _Nudge(
-                  text: '${_dur(since)} am Stück${f.taskTitle == null ? '' : ' · ${f.taskTitle}'}',
-                  onPause: () {
-                    f.dismissReminder();
-                    f.primary();
-                  },
-                  onDismiss: f.dismissReminder,
-                ),
-                const SizedBox(height: 10),
-              ],
               Container(
                 padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
                 decoration: wellDeco(),
@@ -536,11 +564,6 @@ class _FocusTodayState extends State<FocusToday> {
                       onTap: f.phase == FPhase.idle ? null : () => _finish(context)),
                 ),
               ]),
-              if (_note != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 10),
-                  child: Text(_note!, textAlign: TextAlign.center, style: O.small),
-                ),
               const SizedBox(height: 24),
               SectionHead('Heute', hint: '${_dur(todayMs)} fokussiert'),
               const SizedBox(height: 10),
@@ -568,7 +591,7 @@ class _FocusTodayState extends State<FocusToday> {
                     onTap: () => setState(() => _menu = false),
                     child: Container(color: Colors.transparent))),
             Positioned(
-              top: 108 + (f.reminderDue ? 74 : 0),
+              top: 62,
               right: 28,
               width: 230,
               child: Material(
@@ -658,67 +681,177 @@ class _FocusTodayState extends State<FocusToday> {
 
   Future<void> _finish(BuildContext context) async {
     HapticFeedback.mediumImpact();
-    // A linked task asks for its progress first (tasks arrive with Notion).
+    final n = NotionStore.instance;
+    final task = f.taskId == null ? null : n.tasks.where((t) => t.id == f.taskId).firstOrNull;
+    // A linked task asks for its progress first.
     int? progress;
     if (f.taskId != null) {
-      progress = await showProgressSheet(context, f.taskTitle ?? 'Aufgabe');
-      if (progress == null) return; // sheet dismissed: keep running
+      progress = await showFinishSheet(context,
+          title: f.taskTitle ?? 'Aufgabe',
+          sessionMs: f.studied,
+          totalMin: (task?.focusMin ?? 0) + f.studied ~/ 60000,
+          before: task?.progress);
+      if (progress == null) return; // "Weiterarbeiten"
     }
+    final run = f.snapshotRun();
+    final lists = n.snapshot();
     final s = f.finish(progress: progress);
     if (s == null) return;
+    final to = n.configured ? ' · an Notion' : '';
+    String done(int p) => p >= 100 ? 'Aufgabe abgeschlossen$to' : 'Stand $p %$to';
     if (s.studiedMs >= 60000) {
-      NotionStore.instance.enqueueSession(s);
-    } else if (mounted) {
-      // A short session is not logged, but a changed progress still counts.
-      final n = NotionStore.instance;
-      final before = n.tasks.where((t) => t.id == s.taskId).firstOrNull?.progress;
-      final changed = s.taskId != null && progress != null && progress != before;
-      if (changed) n.setProgress(s.taskId!, progress);
-      setState(() => _note = changed
-          ? 'Fortschritt gespeichert · Session unter 1 Minute'
-          : 'Unter 1 Minute – nicht gespeichert');
-      _noteT?.cancel();
-      _noteT = Timer(const Duration(seconds: 4), () {
-        if (mounted) setState(() => _note = null);
+      final uid = n.enqueueSession(s);
+      OToast.instance.show(progress == null ? 'Session gespeichert$to' : done(progress),
+          undo: () {
+        n.undo(uid, lists);
+        f.restore(run, s.id);
       });
+      return;
+    }
+    // Under a minute: no session — but a changed progress still counts.
+    final uid = s.taskId == null || progress == null ? null : n.setProgress(s.taskId!, progress);
+    if (uid != null) {
+      OToast.instance.show(done(progress!), undo: () {
+        n.undo(uid, lists);
+        f.restore(run, null);
+      });
+    } else {
+      OToast.instance.show('Unter 1 Minute – nicht gespeichert');
     }
   }
 }
 
-/// "Wie weit bist du?" — 25/50/75/fertig. Null when dismissed.
-Future<int?> showProgressSheet(BuildContext context, String title) =>
+/// Session end (mockup): progress slider in 5 % steps, quick chips, the
+/// previous state; "Weiterarbeiten" returns null.
+Future<int?> showFinishSheet(BuildContext context,
+        {required String title, required int sessionMs, required int totalMin, int? before}) =>
     showModalBottomSheet<int>(
       context: context,
+      isScrollControlled: true,
       backgroundColor: O.tile,
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(22))),
-      builder: (c) => SafeArea(
+      builder: (c) => _FinishSheet(
+          title: title, sessionMs: sessionMs, totalMin: totalMin, before: before),
+    );
+
+class _FinishSheet extends StatefulWidget {
+  final String title;
+  final int sessionMs, totalMin;
+  final int? before;
+  const _FinishSheet(
+      {required this.title, required this.sessionMs, required this.totalMin, this.before});
+  @override
+  State<_FinishSheet> createState() => _FinishSheetState();
+}
+
+class _FinishSheetState extends State<_FinishSheet> {
+  late int _p = ((widget.before ?? 0) + 25).clamp(0, 100);
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 18, 16, 16),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text(title, style: O.body),
+          padding: const EdgeInsets.fromLTRB(18, 10, 18, 16),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Center(
+              child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration:
+                      BoxDecoration(color: O.raised, borderRadius: BorderRadius.circular(2))),
+            ),
+            const SizedBox(height: 14),
+            const Text('SESSION BEENDEN', style: O.label),
             const SizedBox(height: 4),
-            const Text('Wie weit bist du?', style: O.small),
+            const Text('Wie weit bist du?',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: O.ink)),
+            const SizedBox(height: 2),
+            Text(widget.title, style: O.small),
+            const SizedBox(height: 16),
+            Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              Text.rich(TextSpan(children: [
+                TextSpan(
+                    text: '$_p',
+                    style: const TextStyle(
+                        fontSize: 56,
+                        fontWeight: FontWeight.w300,
+                        height: 1,
+                        color: O.ink,
+                        fontFeatures: O.tabular)),
+                const TextSpan(text: ' %', style: TextStyle(fontSize: 20, color: O.ink3)),
+              ])),
+              const Spacer(),
+              Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                Text('Session ${_dur(widget.sessionMs)} · gesamt ${hMin(widget.totalMin)}',
+                    style: O.small),
+                Text(widget.before == null || widget.before == 0
+                    ? 'noch kein Stand'
+                    : 'vorher ${widget.before} %', style: O.small),
+              ]),
+            ]),
+            const SizedBox(height: 6),
+            SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                activeTrackColor: O.ink,
+                inactiveTrackColor: O.raised,
+                thumbColor: O.ink,
+                overlayColor: O.ink.withValues(alpha: .08),
+                trackHeight: 4,
+              ),
+              child: Slider(
+                value: _p.toDouble(),
+                min: 0,
+                max: 100,
+                divisions: 20,
+                onChanged: (v) {
+                  if (v.round() != _p) HapticFeedback.selectionClick();
+                  setState(() => _p = v.round());
+                },
+              ),
+            ),
+            Row(children: [
+              for (final v in const [25, 50, 75, 100]) ...[
+                if (v != 25) const SizedBox(width: 8),
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () => setState(() => _p = v),
+                    child: Container(
+                      height: 36,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: _p == v ? O.ink : O.pill,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(v == 100 ? 'Fertig' : '$v %',
+                          style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: _p == v ? O.bg : O.ink2)),
+                    ),
+                  ),
+                ),
+              ],
+            ]),
             const SizedBox(height: 16),
             Row(children: [
-              for (final p in const [25, 50, 75]) ...[
-                Expanded(
-                    child: OButton('$p %',
-                        primary: false, height: 48, onTap: () => Navigator.of(c).pop(p))),
-                const SizedBox(width: 8),
-              ],
               Expanded(
-                  child: OButton('Fertig', height: 48, onTap: () => Navigator.of(c).pop(100))),
+                  child: OButton('Weiterarbeiten',
+                      primary: false, height: 52, onTap: () => Navigator.of(context).pop())),
+              const SizedBox(width: 8),
+              Expanded(
+                  child: OButton(_p >= 100 ? 'Aufgabe abschließen' : 'Stand speichern',
+                      height: 52, onTap: () => Navigator.of(context).pop(_p))),
             ]),
           ]),
         ),
-      ),
-    );
+      );
+}
 
-class _Nudge extends StatelessWidget {
+/// Global pause banner (shown by the shell in every tab).
+class PauseNudge extends StatelessWidget {
   final String text;
   final VoidCallback onPause, onDismiss;
-  const _Nudge({required this.text, required this.onPause, required this.onDismiss});
+  const PauseNudge({super.key, required this.text, required this.onPause, required this.onDismiss});
   @override
   Widget build(BuildContext context) => Container(
         padding: const EdgeInsets.fromLTRB(14, 10, 6, 10),
@@ -772,19 +905,15 @@ class _SessionRow extends StatelessWidget {
   final FocusSession s;
   const _SessionRow(this.s);
 
-  static final _hrCache = <String, int?>{};
-
-  Future<int?> _avgHr() async {
-    if (_hrCache[s.id] != null) return _hrCache[s.id];
-    try {
-      final rows = await LocalDb.hrSamplesInRange(s.start ~/ 1000, s.end ~/ 1000);
-      if (rows.length < 60) return null; // under a minute of band data: not yet
-      final sum = rows.fold<num>(0, (a, r) => a + ((r['hr'] as num?) ?? 0));
-      final v = (sum / rows.length).round();
-      _hrCache[s.id] = v;
-      return v;
-    } catch (_) {
-      return null;
+  Future<void> _open() async {
+    final n = NotionStore.instance;
+    final url = n.sessionUrl(s.id);
+    if (url != null) {
+      await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+    } else {
+      OToast.instance.show(n.configured
+          ? 'Noch nicht in Notion – kommt mit dem nächsten Sync'
+          : 'Notion ist nicht verbunden');
     }
   }
 
@@ -792,32 +921,35 @@ class _SessionRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final a = DateTime.fromMillisecondsSinceEpoch(s.start);
     final b = DateTime.fromMillisecondsSinceEpoch(s.end);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 11, 14, 11),
-      child: Row(children: [
-        Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(s.label, style: O.body),
-            const SizedBox(height: 2),
-            Text(
-                '${hhmm(a)} – ${hhmm(b)}'
-                '${s.progress == null ? '' : ' · ${s.progress} %'}',
-                style: O.small),
-          ]),
-        ),
-        Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-          Text(_dur(s.studiedMs),
-              style: const TextStyle(
-                  fontSize: 14, fontWeight: FontWeight.w600, color: O.ink, fontFeatures: O.tabular)),
-          const SizedBox(height: 2),
-          FutureBuilder<int?>(
-            future: _avgHr(),
-            builder: (c, snap) => Text(
-                snap.data == null ? 'Puls: wartet auf Band' : 'Ø ${snap.data} bpm',
-                style: O.small),
+    return InkWell(
+      onTap: _open,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 11, 14, 11),
+        child: Row(children: [
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(s.label, style: O.body),
+              const SizedBox(height: 2),
+              Text(
+                  '${hhmm(a)} – ${hhmm(b)}'
+                  '${s.progress == null ? '' : ' · ${s.progress} %'}',
+                  style: O.small),
+            ]),
           ),
+          Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+            Text(_dur(s.studiedMs),
+                style: const TextStyle(
+                    fontSize: 14, fontWeight: FontWeight.w600, color: O.ink, fontFeatures: O.tabular)),
+            const SizedBox(height: 2),
+            FutureBuilder<int?>(
+              future: FocusStore.instance.avgHr(s),
+              builder: (c, snap) => Text(
+                  snap.data == null ? 'wartet auf Sync' : 'Ø ${snap.data} bpm',
+                  style: O.small),
+            ),
+          ]),
         ]),
-      ]),
+      ),
     );
   }
 }
@@ -827,6 +959,7 @@ class _SessionRow extends StatelessWidget {
 class FocusPeriod extends StatelessWidget {
   final int n;
   const FocusPeriod({super.key, required this.n});
+
   @override
   Widget build(BuildContext context) {
     final f = FocusStore.instance;
@@ -834,48 +967,118 @@ class FocusPeriod extends StatelessWidget {
       listenable: f,
       builder: (context, _) {
         final days = lastDays(n);
-        List<double?> hours(String? type) => [
-              for (final d in days)
+        final perDay = [for (final d in days) f.onDay(d)];
+        final sessions = [for (final l in perDay) ...l];
+        return FutureBuilder<Map<String, int?>>(
+          // Average HR per session from the band's 1 Hz data (cached).
+          future: () async {
+            final m = <String, int?>{};
+            for (final s in sessions) {
+              m[s.id] = await f.avgHr(s);
+            }
+            return m;
+          }(),
+          builder: (context, snap) {
+            final hr = snap.data ?? const <String, int?>{};
+            final focusH = [
+              for (final l in perDay)
                 () {
-                  final ms = f
-                      .onDay(d)
-                      .where((s) => type == null || s.type == type)
-                      .fold<int>(0, (a, s) => a + s.studiedMs);
+                  final ms = l.fold<int>(0, (a, s) => a + s.studiedMs);
                   return ms == 0 ? null : ms / 3600000;
                 }(),
             ];
-        final all = hours(null);
-        final total = all.whereType<double>().fold<double>(0, (a, b) => a + b);
-        final sessions = [for (final d in days) ...f.onDay(d)];
-        final avgLen = sessions.isEmpty
-            ? null
-            : sessions.fold<int>(0, (a, s) => a + s.studiedMs) / sessions.length / 60000;
-        return ListView(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
-          children: [
-            SectionHead(n == 7 ? 'Letzte 7 Tage' : 'Letzte 30 Tage',
-                hint: '${wdDm(days.first)} – ${wdDm(days.last)}'),
-            const SizedBox(height: 10),
-            Row(children: [
-              Expanded(
-                  child: SumTile('Fokuszeit', sessions.isEmpty ? '--' : de(total, 1),
-                      sessions.isEmpty ? 'h' : 'h fokussiert',
-                      height: 118)),
-              const SizedBox(width: 8),
-              Expanded(
-                  child: SumTile('Sessions', sessions.isEmpty ? '--' : '${sessions.length}',
-                      avgLen == null ? 'noch keine' : 'Ø ${hMin(avgLen)} lang',
-                      height: 118)),
-            ]),
-            const SizedBox(height: 12),
-            TrendCard(
-                spec: const TrendSpec('focus', 'Fokus', 'h', dec: 1),
-                days: days,
-                values: all,
-                emptyNote: 'noch keine Sessions'),
-          ],
+            // Puls im Fokus: time-weighted average of the sessions with HR.
+            final pulse = [
+              for (final l in perDay)
+                () {
+                  var w = 0, sum = 0.0;
+                  for (final s in l) {
+                    final h = hr[s.id];
+                    if (h == null) continue;
+                    w += s.studiedMs;
+                    sum += h * s.studiedMs;
+                  }
+                  return w == 0 ? null : sum / w;
+                }(),
+            ];
+            // Pausen pro Stunde: break minutes per focused hour.
+            final breaksPerH = [
+              for (final l in perDay)
+                () {
+                  final st = l.fold<int>(0, (a, s) => a + s.studiedMs);
+                  final br = l.fold<int>(0, (a, s) => a + s.breakMs);
+                  return st < 10 * 60000 ? null : (br / 60000) / (st / 3600000);
+                }(),
+            ];
+            final total = focusH.whereType<double>().fold<double>(0, (a, b) => a + b);
+            final calm = _calmest(sessions, hr);
+            return ListView(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
+              children: [
+                SectionHead(n == 7 ? 'Letzte 7 Tage' : 'Letzte 30 Tage',
+                    hint: '${wdDm(days.first)} – ${wdDm(days.last)}'),
+                const SizedBox(height: 10),
+                Row(children: [
+                  Expanded(
+                      child: SumTile('Fokuszeit', sessions.isEmpty ? '--' : '${de(total, 1)} h',
+                          sessions.isEmpty ? 'noch keine Sessions' : '${sessions.length} Sessions',
+                          height: 118)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                      child: SumTile('Ruhigster Fokus', calm ?? '--',
+                          calm == null ? 'braucht ein paar Sessions mit Puls' : 'niedrigster Puls',
+                          height: 118)),
+                ]),
+                const SizedBox(height: 12),
+                TrendCard(
+                    spec: const TrendSpec('focus', 'Fokuszeit', 'h', dec: 1),
+                    days: days,
+                    values: focusH,
+                    emptyNote: 'noch keine Sessions'),
+                const SizedBox(height: 12),
+                TrendCard(
+                    spec: const TrendSpec('focushr', 'Puls im Fokus', 'bpm'),
+                    days: days,
+                    values: pulse,
+                    emptyNote: 'kommt mit dem Band-Sync'),
+                const SizedBox(height: 12),
+                TrendCard(
+                    spec: const TrendSpec('breaks', 'Pausen pro Stunde', 'min'),
+                    days: days,
+                    values: breaksPerH,
+                    emptyNote: 'ab 10 min Fokus am Tag'),
+              ],
+            );
+          },
         );
       },
     );
+  }
+
+  /// Two-hour window (by session start) with the lowest time-weighted HR,
+  /// e.g. "9–11 Uhr". Needs at least 3 sessions with HR.
+  static String? _calmest(List<FocusSession> sessions, Map<String, int?> hr) {
+    final w = <int, int>{}, sum = <int, double>{}, count = <int, int>{};
+    var withHr = 0;
+    for (final s in sessions) {
+      final h = hr[s.id];
+      if (h == null) continue;
+      withHr++;
+      final slot = DateTime.fromMillisecondsSinceEpoch(s.start).hour ~/ 2 * 2;
+      w[slot] = (w[slot] ?? 0) + s.studiedMs;
+      sum[slot] = (sum[slot] ?? 0) + h * s.studiedMs;
+      count[slot] = (count[slot] ?? 0) + 1;
+    }
+    if (withHr < 3) return null;
+    int? best;
+    double? bestV;
+    for (final k in w.keys) {
+      final v = sum[k]! / w[k]!;
+      if (bestV == null || v < bestV) {
+        bestV = v;
+        best = k;
+      }
+    }
+    return best == null ? null : '$best–${best + 2} Uhr';
   }
 }

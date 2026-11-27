@@ -168,6 +168,9 @@ class NotionApi {
 
   Future<Map<String, dynamic>> getPage(String pageId) => _call('GET', 'pages/$pageId');
 
+  Future<Map<String, dynamic>> trashPage(String pageId) =>
+      _call('PATCH', 'pages/$pageId', {'in_trash': true});
+
   /// Adds/changes columns on an existing data source.
   Future<Map<String, dynamic>> updateDataSource(String id, Map<String, Object?> properties) =>
       _call('PATCH', 'data_sources/$id', {'properties': properties});

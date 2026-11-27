@@ -10,6 +10,7 @@ import 'opgg_charts.dart';
 import 'opgg_focus.dart' show FocusStore;
 import 'opgg_style.dart';
 import 'opgg_sync.dart';
+import 'opgg_toast.dart';
 
 /// Energy level wanted for today's energy score (0–100), or null.
 String? wantedLevel(double? energy) => energy == null
@@ -165,7 +166,10 @@ class TasksPage extends StatelessWidget {
       case 'start':
         onStart(t);
       case 'done':
-        NotionStore.instance.completeTask(t);
+        final n = NotionStore.instance;
+        final lists = n.snapshot();
+        final uid = n.completeTask(t);
+        OToast.instance.show('In Notion abgehakt', undo: () => n.undo(uid, lists));
       case 'open':
         if (t.url != null) {
           await launchUrl(Uri.parse(t.url!), mode: LaunchMode.externalApplication);
@@ -355,7 +359,7 @@ class _AddTaskState extends State<_AddTask> {
       _busy = true;
       _err = null;
     });
-    final err = await NotionStore.instance.createTask(
+    final r = await NotionStore.instance.createTask(
       name: name,
       energy: kEnergies[_energy],
       effort: kEfforts[_effort],
@@ -363,12 +367,15 @@ class _AddTaskState extends State<_AddTask> {
       due: due,
     );
     if (!mounted) return;
-    if (err == null) {
+    final id = r.id;
+    if (id != null) {
       Navigator.of(context).pop();
+      OToast.instance.show('Aufgabe angelegt · in Notion',
+          undo: () => NotionStore.instance.trashTask(id));
     } else {
       setState(() {
         _busy = false;
-        _err = err;
+        _err = r.err;
       });
     }
   }

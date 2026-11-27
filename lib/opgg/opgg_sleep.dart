@@ -9,40 +9,43 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../state/app_state.dart';
+import '../state/prefs.dart';
 import '../ui2/profile/alarm.dart' show AlarmArmState, alarmArmOf;
 import 'opgg_charts.dart';
 import 'opgg_data.dart';
+import 'opgg_overview.dart' show Energy;
 import 'opgg_style.dart';
 
-class SleepToday extends StatefulWidget {
+class SleepToday extends StatelessWidget {
   final OpggDay day;
-  const SleepToday({super.key, required this.day});
-  @override
-  State<SleepToday> createState() => _SleepTodayState();
-}
-
-class _SleepTodayState extends State<SleepToday> {
-  int _sub = 0; // 0 Nacht · 1 Wecker · 2 Wind-down
+  final int sub; // 0 Nacht · 1 Wecker · 2 Wind-down
+  final ValueChanged<int> onSub;
+  const SleepToday({super.key, required this.day, required this.sub, required this.onSub});
 
   @override
   Widget build(BuildContext context) {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
       children: [
-        Seg(
-            labels: const ['Nacht', 'Wecker', 'Wind-down'],
-            index: _sub,
-            onPick: (i) => setState(() => _sub = i),
-            height: 34),
+        Seg(labels: const ['Nacht', 'Wecker', 'Wind-down'], index: sub, onPick: onSub, height: 34),
         const SizedBox(height: 16),
-        switch (_sub) {
-          0 => _Night(day: widget.day),
-          1 => const _Alarm(),
-          _ => _WindDown(day: widget.day),
+        switch (sub) {
+          0 => _Night(day: day),
+          1 => _Alarm(day: day, onWind: () => onSub(2)),
+          _ => _WindDown(day: day),
         },
       ],
     );
   }
+}
+
+/// Sleep need if OpenStrap has learned it, else Jonas' 8 h goal (minutes).
+double needOrGoal(OpggDay d) => d.today.sleepNeed.value?.toDouble() ?? 480;
+
+/// Next armed alarm in the future, or null.
+DateTime? nextAlarm(AppState app) {
+  final (at, _) = alarmArmOf(app);
+  return at != null && at.isAfter(DateTime.now()) ? at : null;
 }
 
 // ── Nacht ────────────────────────────────────────────────────────────────────
@@ -65,9 +68,53 @@ class _Night extends StatelessWidget {
     final stagesKnown = deep != null && light != null && rem != null;
     final total = stagesKnown ? deep + light + rem : 0.0;
 
+    final st = t.status;
+    final now = DateTime.now();
+    final shownToday = nightDay != null &&
+        nightDay.year == now.year &&
+        nightDay.month == now.month &&
+        nightDay.day == now.day;
+    // OpenStrap still holds tonight's night back (about an hour past wake).
+    final evaluating = !shownToday &&
+        st != null &&
+        (st.overnightBuilding || st.overnightState == 'provisional');
+    final n = day.night;
+    final range = n == null
+        ? null
+        : '${hhmm(DateTime.fromMillisecondsSinceEpoch(n.onset * 1000))} – '
+            '${hhmm(DateTime.fromMillisecondsSinceEpoch(n.wake * 1000))}';
+    final goal = need ?? 480;
+    final gap = dur == null ? null : dur - goal;
+    double? nightVal(String k, num? today) => today?.toDouble() ?? (nightDay == null ? null : day.on(k, nightDay));
+    final nHrv = nightVal('hrv', t.hrv?.rmssd), nRhr = nightVal('resting_hr', t.restingHr.value);
+    final nResp = nightVal('resp_rate', t.resp?.value);
+
+    if (evaluating && dur == null) {
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: wellDeco(),
+        child: const Row(children: [
+          Dot(O.orange),
+          SizedBox(width: 10),
+          Expanded(
+            child: Text('Nacht wird noch ausgewertet – sie erscheint etwa eine Stunde nach dem Aufwachen.',
+                style: TextStyle(fontSize: 13, color: O.ink2)),
+          ),
+        ]),
+      );
+    }
+
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       SectionHead(nightDay == null ? 'Letzte Nacht' : nightLabel(nightDay).replaceFirst('letzte', 'Letzte'),
-          hint: nightDay == null ? null : wdDm(nightDay)),
+          hint: range ?? (nightDay == null ? null : wdDm(nightDay))),
+      if (evaluating) ...[
+        const SizedBox(height: 6),
+        const Row(children: [
+          Dot(O.orange, size: 6),
+          SizedBox(width: 6),
+          Text('Heutige Nacht wird noch ausgewertet', style: O.small),
+        ]),
+      ],
       const SizedBox(height: 10),
       Container(
         padding: const EdgeInsets.all(16),
@@ -82,6 +129,13 @@ class _Night extends StatelessWidget {
               padding: const EdgeInsets.only(bottom: 8),
               child: Text(need == null ? 'von 8 h Ziel' : 'von ${hMin(need)} Bedarf', style: O.small),
             ),
+            const Spacer(),
+            if (gap != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(gap >= 0 ? 'Ziel erreicht' : '−${hMin(-gap)} zum Ziel',
+                    style: TextStyle(fontSize: 13, color: gap >= 0 ? O.green : O.ink2)),
+              ),
           ]),
           const SizedBox(height: 12),
           ClipRRect(
@@ -119,6 +173,30 @@ class _Night extends StatelessWidget {
           ]),
         ]),
       ),
+      const SizedBox(height: 10),
+      Row(children: [
+        for (final v in [
+          ('HRV nachts', nHrv?.round().toString(), 'ms'),
+          ('Ruhepuls', nRhr?.round().toString(), 'bpm'),
+          ('Atmung', nResp == null ? null : de(nResp, 1), '/min'),
+        ]) ...[
+          if (v.$1 != 'HRV nachts') const SizedBox(width: 8),
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+              decoration: tileDeco(),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(v.$1, style: O.small),
+                const SizedBox(height: 3),
+                Text(v.$2 ?? '—',
+                    style: const TextStyle(
+                        fontSize: 20, fontWeight: FontWeight.w500, color: O.ink, fontFeatures: O.tabular)),
+                Text(v.$3, style: const TextStyle(fontSize: 11, color: O.ink3)),
+              ]),
+            ),
+          ),
+        ],
+      ]),
       if (dur == null) ...[
         const SizedBox(height: 10),
         const Text('Noch keine Nacht erfasst. Band über Nacht tragen, morgens synchronisiert es von selbst.',
@@ -151,7 +229,9 @@ DateTime nextAt(int h, int m) {
 }
 
 class _Alarm extends StatefulWidget {
-  const _Alarm();
+  final OpggDay day;
+  final VoidCallback onWind;
+  const _Alarm({required this.day, required this.onWind});
   @override
   State<_Alarm> createState() => _AlarmState();
 }
@@ -163,6 +243,7 @@ class _Alarm extends StatefulWidget {
 class _AlarmState extends State<_Alarm> {
   int? _h, _m; // picked, not yet saved
   Set<int>? _days; // 0=Mo..6=So, edited, not yet saved
+  int? _win; // 0 = fest, else smart window in minutes (edited, not yet saved)
   bool _busy = false;
   String? _err, _info;
 
@@ -181,8 +262,11 @@ class _AlarmState extends State<_Alarm> {
     // Nothing scheduled yet: suggest the day of the next occurrence.
     final days = _days ?? (on.isNotEmpty ? on : {nextAt(h, m).weekday - 1});
     final timeDirty = firstOn == null || firstOn.hour != h || firstOn.minute != m;
+    final savedWin = firstOn?.smartWindowMinutes ?? 0;
+    final win = _win ?? savedWin;
     final dirty = (_days != null && !_sameSet(_days!, on)) ||
         (_h != null && timeDirty) ||
+        (_win != null && _win != savedWin) ||
         on.isEmpty;
 
     final (Color dot, String status) = _err != null
@@ -192,7 +276,13 @@ class _AlarmState extends State<_Alarm> {
             : !live
                 ? (O.orange, _info ?? 'Gespeichert – geht beim nächsten Verbinden ans Band')
                 : switch (state) {
-                    AlarmArmState.confirmed => (O.green, 'Band vibriert ${_when(armedAt)}'),
+                    AlarmArmState.confirmed => (
+                        O.green,
+                        savedWin > 0
+                            ? 'Weckt in leichtem Schlaf ab '
+                                '${hhmm(armedAt.subtract(Duration(minutes: savedWin)))} · spätestens ${_when(armedAt)}'
+                            : 'Band vibriert ${_when(armedAt)}'
+                      ),
                     AlarmArmState.pending => (O.orange, 'Wird ans Band gesendet …'),
                     _ => (O.orange, 'Gestellt für ${_when(armedAt)}, Band hat nicht bestätigt'),
                   };
@@ -287,6 +377,38 @@ class _AlarmState extends State<_Alarm> {
         Expanded(child: Text(status, style: const TextStyle(fontSize: 13, color: O.ink2))),
       ]),
       const SizedBox(height: 14),
+      Seg(
+          labels: const ['Fest', 'Smart'],
+          index: win > 0 ? 1 : 0,
+          onPick: (i) => setState(() => _win = i == 0 ? 0 : (savedWin > 0 ? savedWin : 30)),
+          height: 34),
+      if (win > 0) ...[
+        const SizedBox(height: 12),
+        const Text('IN LEICHTEM SCHLAF, BIS ZU … FRÜHER', style: O.label),
+        const SizedBox(height: 8),
+        Row(children: [
+          for (final w in const [15, 30, 45]) ...[
+            if (w != 15) const SizedBox(width: 8),
+            Expanded(
+              child: GestureDetector(
+                onTap: () => setState(() => _win = w),
+                child: Container(
+                  height: 36,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                      color: win == w ? O.ink : O.pill, borderRadius: BorderRadius.circular(10)),
+                  child: Text('$w min',
+                      style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: win == w ? O.bg : O.ink2)),
+                ),
+              ),
+            ),
+          ],
+        ]),
+      ],
+      const SizedBox(height: 14),
       Row(children: [
         if (on.isNotEmpty) ...[
           Expanded(
@@ -298,11 +420,32 @@ class _AlarmState extends State<_Alarm> {
           flex: 2,
           child: OButton(
             _busy ? 'Sende …' : (on.isEmpty ? 'Wecker stellen' : (dirty ? 'Speichern' : 'Gestellt')),
-            onTap: (_busy || !dirty || days.isEmpty) ? null : () => _save(app, h, m, days, on),
+            onTap: (_busy || !dirty || days.isEmpty) ? null : () => _save(app, h, m, days, on, win),
             height: 48,
           ),
         ),
       ]),
+      const SizedBox(height: 14),
+      Container(
+        padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+        decoration: tileDeco(),
+        child: Row(children: [
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Für ${hMin(needOrGoal(widget.day))} Schlaf ins Bett um', style: O.small),
+              Text(
+                  next == null
+                      ? '--:--'
+                      : hhmm(next.subtract(Duration(minutes: needOrGoal(widget.day).round()))),
+                  style: const TextStyle(
+                      fontSize: 22, fontWeight: FontWeight.w500, color: O.ink, fontFeatures: O.tabular)),
+            ]),
+          ),
+          SizedBox(
+              width: 120,
+              child: OButton('Wind-down', primary: false, height: 44, onTap: widget.onWind)),
+        ]),
+      ),
       const SizedBox(height: 10),
       const Text(
           'Wiederholt sich an den markierten Tagen. Das Band vibriert auch ohne Handy in der Nähe.',
@@ -333,7 +476,7 @@ class _AlarmState extends State<_Alarm> {
     return '$day ${hhmm(t)}';
   }
 
-  Future<void> _save(AppState app, int h, int m, Set<int> days, Set<int> on) async {
+  Future<void> _save(AppState app, int h, int m, Set<int> days, Set<int> on, int win) async {
     setState(() {
       _busy = true;
       _err = null;
@@ -345,8 +488,10 @@ class _AlarmState extends State<_Alarm> {
       var onBand = await app.setWakeTimeAllDays(hour: h, minute: m);
       for (var i = 0; i < 7; i++) {
         final want = days.contains(i);
-        if (want != on.contains(i)) {
-          onBand = await app.setScheduleDay(weekday: i, enabled: want);
+        final cur = app.alarmSchedule.where((e) => e.weekday == i).firstOrNull;
+        if (want != on.contains(i) || (want && (cur?.smartWindowMinutes ?? 0) != win)) {
+          onBand = await app.setScheduleDay(
+              weekday: i, enabled: want, smartWindowMinutes: want ? win : null);
         }
       }
       if (!mounted) return;
@@ -354,6 +499,7 @@ class _AlarmState extends State<_Alarm> {
         _h = null;
         _m = null;
         _days = null;
+        _win = null;
         if (!onBand) {
           _info = app.isConnected
               ? 'Gespeichert – Band hat noch nicht geantwortet'
@@ -478,91 +624,227 @@ class _WindDown extends StatefulWidget {
   State<_WindDown> createState() => _WindDownState();
 }
 
+/// Wind-down (mockup): phase with countdown to wind-down start / bedtime,
+/// a four-step routine (ticked per evening, not tracked), and a 4-minute
+/// breathing exercise with the band's live pulse.
 class _WindDownState extends State<_WindDown> {
-  final _done = <int>{};
-  static const _steps = [
-    'Bildschirme weg',
-    'Licht dimmen',
-    'Zimmer kühl & dunkel',
-    'Morgen kurz notieren',
-  ];
+  Timer? _tick;
+  int? _breath; // epoch ms the breathing started
+  AppState? _app;
+
+  static String _dayKey() {
+    // An evening's routine belongs to the night: before 6 am still counts as yesterday.
+    final n = DateTime.now().subtract(const Duration(hours: 6));
+    return 'opgg_wd_${n.year}${pad2(n.month)}${pad2(n.day)}';
+  }
+
+  Set<String> get _done => Prefs.getString(_dayKey(), '').split(',').where((e) => e.isNotEmpty).toSet();
+
+  void _toggle(String id) {
+    final d = _done;
+    d.contains(id) ? d.remove(id) : d.add(id);
+    Prefs.setString(_dayKey(), d.join(','));
+    HapticFeedback.selectionClick();
+    setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _app = context.read<AppState>();
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    if (_breath != null) _app?.releaseLiveHrView();
+    super.dispose();
+  }
+
+  String _clock(Duration d) {
+    final s = d.inSeconds.clamp(0, 359999);
+    return '${pad2(s ~/ 3600)}:${pad2(s % 3600 ~/ 60)}:${pad2(s % 60)}';
+  }
 
   @override
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
-    final (armedAt, _) = alarmArmOf(app);
     final now = DateTime.now();
-    final wake = (armedAt != null && armedAt.isAfter(now)) ? armedAt : null;
-    final learned = widget.day.today.sleepNeed.value;
-    final need = learned ?? 480; // 8 h goal until OpenStrap has learned the need
+    final wake = nextAlarm(app);
+    final need = needOrGoal(widget.day);
+    final bed = wake?.subtract(Duration(minutes: need.round()));
+    final start = bed?.subtract(const Duration(minutes: 45));
 
-    DateTime? bed, start;
-    if (wake != null) {
-      // +15 min to fall asleep, wind-down 45 min before bed.
-      bed = wake.subtract(Duration(minutes: need.round() + 15));
-      start = bed.subtract(const Duration(minutes: 45));
+    final String phase, clock, sub;
+    final Color dot;
+    if (bed == null || start == null) {
+      phase = 'Kein Wecker';
+      clock = '--:--:--';
+      sub = 'Stell einen Wecker, dann rechnet OPGG Wind-down und Bettzeit aus.';
+      dot = O.grey;
+    } else if (now.isBefore(start)) {
+      phase = 'Bereit';
+      clock = _clock(start.difference(now));
+      sub = 'Wind-down ab ${hhmm(start)} · Bett um ${hhmm(bed)}';
+      dot = O.grey;
+    } else if (now.isBefore(bed)) {
+      phase = 'Läuft';
+      clock = _clock(bed.difference(now));
+      sub = 'Noch bis zum Bett um ${hhmm(bed)}';
+      dot = O.green;
+    } else {
+      phase = 'Schlafenszeit';
+      clock = '00:00:00';
+      sub = 'Ab ins Bett – der Wecker steht';
+      dot = O.orange;
     }
 
+    final calm = Energy.of(widget.day).calm;
+    final bEl = _breath == null ? 0 : now.millisecondsSinceEpoch - _breath!;
+    final bDone = bEl >= 240000;
+    final inhale = (bEl ~/ 4000) % 2 == 0;
+    final hr = app.isConnected ? app.liveHr : null;
+    final done = _done;
+    final routine = [
+      ('lap', 'Laptop runterfahren',
+          'Shutdown Timer${bed == null ? '' : ' · ${hhmm(bed.subtract(const Duration(minutes: 30)))}'}'),
+      ('plan', 'Morgen planen', 'Aufgaben in Notion nach Energie sortieren'),
+      ('phone', 'Handy weglegen', bed == null ? 'vor dem Schlafen' : 'ab ${hhmm(bed.subtract(const Duration(minutes: 15)))}'),
+      ('br', 'Atmen', '4 min · Puls vom Band'),
+    ];
+
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      const SectionHead('Wind-down', hint: 'nicht getrackt'),
-      const SizedBox(height: 10),
       Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
         decoration: wellDeco(),
-        child: Row(children: [
-          _big('Start', start == null ? '--:--' : hhmm(start)),
-          _big('Ins Bett', bed == null ? '--:--' : hhmm(bed)),
-          _big('Wecker', wake == null ? '--:--' : hhmm(wake)),
+        child: Column(children: [
+          Row(children: [
+            Dot(dot),
+            const SizedBox(width: 7),
+            Text(phase, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: O.ink2)),
+            const Spacer(),
+            Text('Ruhe ${calm == null ? '—' : calm.round()}', style: O.small),
+          ]),
+          const SizedBox(height: 14),
+          if (_breath == null) ...[
+            Text(clock,
+                style: TextStyle(
+                    fontSize: 54,
+                    fontWeight: FontWeight.w200,
+                    height: 1,
+                    fontFeatures: O.tabular,
+                    color: phase == 'Schlafenszeit' ? const Color(0xFF46464B) : O.ink)),
+            const SizedBox(height: 8),
+            Text(sub, style: O.small, textAlign: TextAlign.center),
+          ] else ...[
+            SizedBox(
+              height: 130,
+              child: Center(
+                child: AnimatedScale(
+                  scale: bDone ? .55 : (inhale ? 1 : .55),
+                  duration: const Duration(milliseconds: 3800),
+                  curve: Curves.easeInOut,
+                  child: Container(
+                    width: 104,
+                    height: 104,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: RadialGradient(
+                          center: Alignment(0, -.3), colors: [O.ink, Color(0xFFC7C7CC)]),
+                      boxShadow: [BoxShadow(color: Color(0x2EFFFFFF), blurRadius: 40)],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Text(
+                '${bDone ? 'Fertig' : inhale ? 'Einatmen' : 'Ausatmen'} · noch '
+                '${(240 - bEl ~/ 1000).clamp(0, 240) ~/ 60}:${pad2((240 - bEl ~/ 1000).clamp(0, 240) % 60)}'
+                '${hr == null ? '' : ' · Puls $hr'}',
+                style: const TextStyle(fontSize: 13, color: O.ink2)),
+          ],
         ]),
       ),
-      const SizedBox(height: 8),
-      Text(
-          wake == null
-              ? 'Stell einen Wecker, dann rechnet OPGG die Zeiten aus deinem Schlafbedarf.'
-              : 'Aus Weckzeit, ${hMin(need)} ${learned == null ? 'Schlafziel' : 'Schlafbedarf'} und 15 min Einschlafzeit.',
-          style: O.small),
+      const SizedBox(height: 10),
+      OButton(
+        _breath == null ? 'Atemübung starten' : (bDone ? 'Fertig – abhaken' : 'Atmen beenden'),
+        height: 58,
+        primary: _breath == null || bDone,
+        onTap: () {
+          setState(() {
+            if (_breath == null) {
+              _breath = now.millisecondsSinceEpoch;
+              _app?.retainLiveHrView();
+            } else {
+              if (bDone && !_done.contains('br')) _toggle('br');
+              _breath = null;
+              _app?.releaseLiveHrView();
+            }
+          });
+        },
+      ),
       const SizedBox(height: 18),
-      for (var i = 0; i < _steps.length; i++)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(16),
-            onTap: () => setState(() => _done.contains(i) ? _done.remove(i) : _done.add(i)),
-            child: Ink(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-              decoration: tileDeco(),
-              child: Row(children: [
-                Icon(_done.contains(i) ? Icons.check_circle : Icons.circle_outlined,
-                    size: 20, color: _done.contains(i) ? O.ink : O.ink3),
-                const SizedBox(width: 12),
-                Text(_steps[i],
-                    style: O.body.copyWith(
-                        color: _done.contains(i) ? O.ink3 : O.ink,
-                        decoration: _done.contains(i) ? TextDecoration.lineThrough : null)),
-              ]),
+      SectionHead('Routine', hint: '${done.length.clamp(0, 4)}/4'),
+      const SizedBox(height: 10),
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+        decoration: tileDeco(),
+        child: Column(children: [
+          for (var i = 0; i < routine.length; i++)
+            InkWell(
+              onTap: () => _toggle(routine[i].$1),
+              child: Container(
+                constraints: const BoxConstraints(minHeight: 52),
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                decoration:
+                    i == 0 ? null : const BoxDecoration(border: Border(top: BorderSide(color: O.line))),
+                child: Row(children: [
+                  Container(
+                    width: 20,
+                    height: 20,
+                    decoration: BoxDecoration(
+                      color: done.contains(routine[i].$1) ? O.ink : null,
+                      border: done.contains(routine[i].$1) ? null : Border.all(color: O.ink3, width: 1.5),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: done.contains(routine[i].$1)
+                        ? const Icon(Icons.check, size: 14, color: O.bg)
+                        : null,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(routine[i].$2,
+                          style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                              color: done.contains(routine[i].$1) ? const Color(0xFF6E6E73) : O.ink,
+                              decoration: done.contains(routine[i].$1) ? TextDecoration.lineThrough : null)),
+                      const SizedBox(height: 2),
+                      Text(routine[i].$3, style: O.small),
+                    ]),
+                  ),
+                ]),
+              ),
             ),
-          ),
-        ),
+        ]),
+      ),
+      const SizedBox(height: 10),
+      const Text('Wird nicht getrackt – nur für dich, jeden Abend neu.', style: O.small),
     ]);
   }
-
-  Widget _big(String k, String v) => Expanded(
-        child: Column(children: [
-          Text(k, style: O.small),
-          const SizedBox(height: 4),
-          Text(v,
-              style: const TextStyle(
-                  fontSize: 22, fontWeight: FontWeight.w400, color: O.ink, fontFeatures: O.tabular)),
-        ]),
-      );
 }
 
 // ── Woche / Monat ─────────────────────────────────────────────────────────────
 
 double _h(double m) => m / 60;
-const _sleepSpec = TrendSpec('sleep', 'Schlaf', 'h', dec: 1, map: _h, goal: 8, goalLabel: '8 h');
+const _sleepSpec = TrendSpec('sleep', 'Schlafdauer', 'h', dec: 1, map: _h, goal: 8, goalLabel: '8 h');
 const _deepSpec = TrendSpec('deep', 'Tiefschlaf', 'h', dec: 1, map: _h);
-const _remSpec = TrendSpec('rem', 'REM', 'h', dec: 1, map: _h);
+const _hrvSpec = TrendSpec('hrv', 'HRV nachts', 'ms');
+const _rhrSpec = TrendSpec('resting_hr', 'Ruhepuls nachts', 'bpm');
 
 class SleepPeriod extends StatelessWidget {
   final OpggDay day;
@@ -571,10 +853,12 @@ class SleepPeriod extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final days = lastDays(n);
-    final sl = valuesFor(day, _sleepSpec, days);
+    final sl = valuesFor(day, _sleepSpec, days); // hours
     final avg = avgOf(sl);
-    final nights = sl.whereType<double>().length;
-    final hit = sl.whereType<double>().where((v) => v >= 8).length;
+    final goalH = needOrGoal(day) / 60;
+    // Schlafschuld: what the recorded nights fell short of the goal, summed.
+    final nights = sl.whereType<double>().toList();
+    final debt = nights.fold<double>(0, (a, v) => a + (v < goalH ? goalH - v : 0));
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
       children: [
@@ -584,18 +868,21 @@ class SleepPeriod extends StatelessWidget {
         Row(children: [
           Expanded(
               child: SumTile('Ø Schlaf', avg == null ? '--' : de(avg, 1), 'h pro Nacht',
-                  bar: avg == null ? null : avg / 8, height: 118)),
+                  bar: avg == null ? null : avg / goalH, height: 118)),
           const SizedBox(width: 8),
           Expanded(
-              child: SumTile('Ziel 8 h', nights == 0 ? '--' : '$hit/$nights', 'Nächte erreicht',
-                  bar: nights == 0 ? null : hit / nights, height: 118)),
+              child: SumTile('Schlafschuld', nights.isEmpty ? '--' : hMin(debt * 60),
+                  nights.isEmpty ? 'noch keine Nächte' : 'unter Ziel · ${nights.length} Nächte',
+                  height: 118)),
         ]),
         const SizedBox(height: 12),
         TrendCard(spec: _sleepSpec, days: days, values: sl),
         const SizedBox(height: 12),
         TrendCard(spec: _deepSpec, days: days, values: valuesFor(day, _deepSpec, days)),
         const SizedBox(height: 12),
-        TrendCard(spec: _remSpec, days: days, values: valuesFor(day, _remSpec, days)),
+        TrendCard(spec: _hrvSpec, days: days, values: valuesFor(day, _hrvSpec, days)),
+        const SizedBox(height: 12),
+        TrendCard(spec: _rhrSpec, days: days, values: valuesFor(day, _rhrSpec, days)),
       ],
     );
   }

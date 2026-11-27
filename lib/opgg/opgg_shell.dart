@@ -52,6 +52,8 @@ const _kGlyphs = {
       '<svg viewBox="0 0 24 24" fill="none" stroke="#f4f4f5" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 10.5a5 5 0 0 1 7 0M12 10.5l1.5-2"/></svg>',
   'sleep':
       '<svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="#f4f4f5"/></svg>',
+  'wind':
+      '<svg viewBox="0 0 24 24" fill="none" stroke="#f4f4f5" stroke-width="2.4" stroke-linecap="round"><path d="M3 9h10a3 3 0 1 0-3-3M3 14h14a3 3 0 1 1-3 3M3 19h5"/></svg>',
   'settings':
       '<svg viewBox="0 0 24 24" fill="none" stroke="#f4f4f5" stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg>',
 };
@@ -84,6 +86,7 @@ class _OpggShellState extends State<OpggShell> {
   int _bandLogAt = 0;
   bool _holdSync = false, _holdBand = false; // orange while a held sync runs
   bool _set = false; // settings open in place of the tab (mockup)
+  int _sleepSub = 0; // Schlaf: 0 Nacht · 1 Wecker · 2 Wind-down
   Future<OpggDay>? _data;
   int? _syncKey;
 
@@ -138,12 +141,34 @@ class _OpggShellState extends State<OpggShell> {
     _go(OTab.focus);
   }
 
-  /// Status dot of the current tab: orange = something open.
-  Color _tabDot() => switch (_tab) {
-        OTab.focus => _focus.phase == FPhase.paused ? O.orange : O.green,
-        OTab.tasks => _notion.started.isNotEmpty ? O.orange : O.green,
-        _ => O.green,
-      };
+  /// Open to-dos per tab (mockup): they turn the header dot orange and
+  /// replace the tab's hint in the menu.
+  Map<OTab, String> _todos(AppState app) {
+    final out = <OTab, String>{};
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final started = _notion.started;
+    final due = [
+      for (final t in _notion.tasks)
+        if (t.due != null && !DateTime(t.due!.year, t.due!.month, t.due!.day).isAfter(today)) t
+    ];
+    if (due.isNotEmpty) {
+      final t = due.first;
+      final over = DateTime(t.due!.year, t.due!.month, t.due!.day).isBefore(today);
+      out[OTab.tasks] = '„${t.name}“ ${over ? 'überfällig' : 'heute fällig'}'
+          '${due.length > 1 ? ' · +${due.length - 1}' : ''}';
+    } else if (started.isNotEmpty) {
+      final t = started.first;
+      out[OTab.tasks] = '„${t.name}“ weitermachen (${t.progress} %)';
+    }
+    if (_focus.phase == FPhase.paused) {
+      out[OTab.focus] = 'Fokus pausiert${_focus.taskTitle == null ? '' : ' · ${_focus.taskTitle}'}';
+    }
+    if (app.isPaired && !app.alarmSchedule.any((e) => e.enabled)) {
+      out[OTab.sleep] = 'Kein Wecker am Band';
+    }
+    return out;
+  }
 
   /// Hold-to-sync: buzz, show orange for at least a second, buzz twice when done.
   Future<void> _held(Future<void> Function() work, void Function(bool) flag) async {
@@ -184,6 +209,7 @@ class _OpggShellState extends State<OpggShell> {
 
     final pages =
         _tab.hasTrend && !_set ? const ['Heute', 'Woche', 'Monat'] : const <String>[];
+    final todos = _todos(app);
     final top = MediaQuery.of(context).padding.top + 48 + (pages.isEmpty ? 0 : 44);
 
     return Scaffold(
@@ -191,7 +217,12 @@ class _OpggShellState extends State<OpggShell> {
       body: Stack(children: [
         Column(children: [
           _TopBar(
-            dot: _tabDot(),
+            dot: todos.isEmpty ? O.green : O.orange,
+            glyph: _set
+                ? 'settings'
+                : _tab == OTab.sleep && _sleepSub == 2
+                    ? 'wind'
+                    : _tab.name,
             tab: _tab,
             settingsOpen: _set,
             app: app,
@@ -271,11 +302,7 @@ class _OpggShellState extends State<OpggShell> {
             ),
           ),
         if (_menu)
-          _TabMenu(
-              current: _tab,
-              onPick: _go,
-              focus: _focus.phase,
-              tasksOpen: _notion.started.isNotEmpty),
+          _TabMenu(current: _tab, onPick: _go, focus: _focus.phase, todos: todos),
         if (_bandPop) _BandPopover(app: app),
         if (_syncPop) _SyncPopover(n: _notion),
       ]),
@@ -303,7 +330,8 @@ class _OpggShellState extends State<OpggShell> {
               energy: Energy.of(d).total, onStart: _startTask, onSettings: _settings),
           OTab.overview =>
             OverviewToday(day: d, onStart: _startTask, onTasks: () => _go(OTab.tasks)),
-          OTab.sleep => SleepToday(day: d),
+          OTab.sleep => SleepToday(
+              day: d, sub: _sleepSub, onSub: (i) => setState(() => _sleepSub = i)),
           _ => FocusToday(energy: Energy.of(d).total),
         };
         return PageView(
@@ -419,6 +447,7 @@ class _TopBar extends StatelessWidget {
   final VoidCallback onMenu, onBand, onBandHold, onSettings, onSync, onSyncHold;
   final SyncState sync;
   final bool holdSync, holdBand, settingsOpen;
+  final String glyph;
   final List<String> pages;
   final int page;
   final ValueChanged<int> onPage;
@@ -434,6 +463,7 @@ class _TopBar extends StatelessWidget {
     required this.onSyncHold,
     required this.sync,
     required this.settingsOpen,
+    required this.glyph,
     required this.holdSync,
     required this.holdBand,
     required this.onSettings,
@@ -469,7 +499,7 @@ class _TopBar extends StatelessWidget {
                     borderRadius: BorderRadius.circular(7),
                   ),
                   alignment: Alignment.center,
-                  child: Glyph(settingsOpen ? 'settings' : tab.name),
+                  child: Glyph(glyph),
                 ),
                 const SizedBox(width: 8),
                 _Pill(
@@ -540,9 +570,9 @@ class _TabMenu extends StatelessWidget {
   final OTab current;
   final ValueChanged<OTab> onPick;
   final FPhase focus;
-  final bool tasksOpen;
+  final Map<OTab, String> todos;
   const _TabMenu(
-      {required this.current, required this.onPick, required this.focus, required this.tasksOpen});
+      {required this.current, required this.onPick, required this.focus, required this.todos});
   @override
   Widget build(BuildContext context) {
     final top = MediaQuery.of(context).padding.top + 46;
@@ -582,12 +612,18 @@ class _TabMenu extends StatelessWidget {
                         Expanded(
                           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                             Text(t.label, style: O.body),
-                            Text(t.hint, style: O.small),
+                            Text(todos[t] ?? t.hint,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: todos[t] == null
+                                    ? O.small
+                                    : const TextStyle(fontSize: 12, color: O.orange)),
                           ]),
                         ),
-                        if (t == OTab.tasks && tasksOpen) const Dot(O.orange),
-                        if (t == OTab.focus && focus != FPhase.idle)
-                          Dot(focus == FPhase.running ? O.green : O.orange),
+                        if (todos[t] != null)
+                          const Dot(O.orange)
+                        else if (t == OTab.focus && focus == FPhase.running)
+                          const Dot(O.green),
                       ]),
                     ),
                   ),

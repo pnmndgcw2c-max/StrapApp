@@ -155,10 +155,12 @@ class NotionApi {
     return out;
   }
 
-  Future<String> createPage(String dataSourceId, Map<String, Object?> properties) async {
+  Future<String> createPage(String dataSourceId, Map<String, Object?> properties,
+      {List<Map<String, Object?>>? children}) async {
     final j = await _call('POST', 'pages', {
       'parent': {'type': 'data_source_id', 'data_source_id': dataSourceId},
       'properties': properties,
+      'children': ?children,
     });
     return '${j['id']}';
   }
@@ -213,6 +215,34 @@ class NotionApi {
         'date': d == null
             ? null
             : {'start': '${d.year}-${_p(d.month)}-${_p(d.day)}'}
+      };
+  static Map<String, Object?> text(String t) => {
+        'rich_text': [
+          {
+            'type': 'text',
+            'text': {'content': t.length > 1900 ? t.substring(0, 1900) : t}
+          }
+        ]
+      };
+  static Map<String, Object?> dayRange(DateTime a, DateTime b) => {
+        'date': {
+          'start': '${a.year}-${_p(a.month)}-${_p(a.day)}',
+          if (b != a) 'end': '${b.year}-${_p(b.month)}-${_p(b.day)}',
+        }
+      };
+
+  /// A simple page block (heading_3 / paragraph / bulleted_list_item).
+  static Map<String, Object?> block(String type, String t) => {
+        'object': 'block',
+        'type': type,
+        type: {
+          'rich_text': [
+            {
+              'type': 'text',
+              'text': {'content': t.length > 1900 ? t.substring(0, 1900) : t}
+            }
+          ]
+        },
       };
   static Map<String, Object?> relation(List<String> ids) => {
         'relation': [for (final i in ids) {'id': i}]

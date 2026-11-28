@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'opgg_ai.dart' show RKind, ReportPanel, ReportPen;
 import 'opgg_charts.dart';
 import 'opgg_focus.dart' show FPhase, FocusStore, finishFocus;
 import 'opgg_style.dart';
@@ -659,7 +660,8 @@ class TasksPeriod extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
           children: [
             SectionHead(n == 7 ? 'Letzte 7 Tage' : 'Letzte 30 Tage',
-                hint: '${wdDm(days.first)} – ${wdDm(days.last)}'),
+                hint: '${wdDm(days.first)} – ${wdDm(days.last)}',
+                trailing: ReportPen(n == 7 ? RKind.tasksWeek : RKind.tasksMonth)),
             const SizedBox(height: 10),
             Row(children: [
               Expanded(
@@ -678,6 +680,7 @@ class TasksPeriod extends StatelessWidget {
                               : 'schneller als geschätzt',
                       height: 118)),
             ]),
+            ReportPanel(n == 7 ? RKind.tasksWeek : RKind.tasksMonth),
             const SizedBox(height: 12),
             TrendCard(
                 spec: const TrendSpec('done', 'Erledigte Aufgaben', ''),

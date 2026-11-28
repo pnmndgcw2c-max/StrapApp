@@ -47,7 +47,11 @@ jobs:
       - run: flutter pub get
 
       - name: Build unsigned iOS app
-        run: flutter build ios --release --no-codesign --dart-define-from-file=.env
+        # Build number + commit for Einstellungen → Update (App-Version, App-Updates).
+        run: |
+          flutter build ios --release --no-codesign --dart-define-from-file=.env \
+            --dart-define=OPGG_BUILD=${{ github.run_number }} \
+            --dart-define=OPGG_SHA=$(git rev-parse --short HEAD)
 
       - name: Strip Watch companion (breaks free-account resigning)
         run: rm -rf "build/ios/iphoneos/Runner.app/Watch"

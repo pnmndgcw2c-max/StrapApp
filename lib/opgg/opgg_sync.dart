@@ -13,12 +13,15 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../state/prefs.dart';
 import 'notion_api.dart';
+import 'opgg_ai.dart' show Report;
 import 'opgg_focus.dart' show FocusSession;
 
 // ── schema (created by OPGG on the shared "OPGG" page) ─────────────────────
 
 const kTasksTitle = 'Aufgaben';
 const kSessionsTitle = 'Sessions';
+const kReportsTitle = 'Berichte';
+const kLogTitle = 'Sync-Protokoll';
 const kStatusOpen = 'Offen', kStatusDoing = 'In Arbeit', kStatusDone = 'Erledigt';
 const kEnergies = ['niedrig', 'mittel', 'hoch'];
 const kEfforts = ['kurz', 'mittel', 'lang'];
@@ -65,6 +68,22 @@ Map<String, Object?> sessionsSchema(String tasksDs) => {
       'Fortschritt': {
         'number': {'format': 'percent'}
       },
+    };
+
+Map<String, Object?> reportsSchema() => {
+      'Name': {'title': {}},
+      'Art': _sel([('Tagesbericht', 'blue'), ('Wochenbericht', 'purple'), ('Monatsbericht', 'pink')]),
+      'Bereich': _sel([('Überblick', 'gray'), ('Aufgaben', 'green'), ('Fitness', 'orange')]),
+      'Zeitraum': {'date': {}},
+      'Erstellt': {'date': {}},
+      'Modell': {'rich_text': {}},
+    };
+
+Map<String, Object?> logSchema() => {
+      'Name': {'title': {}},
+      'Quelle': _sel([('Notion', 'gray'), ('Band', 'blue'), ('KI', 'purple')]),
+      'Status': _sel([('ok', 'green'), ('Fehler', 'red')]),
+      'Zeit': {'date': {}},
     };
 
 // ── model ────────────────────────────────────────────────────────────────────
@@ -202,6 +221,18 @@ class NotionStore extends ChangeNotifier {
   static const _kLog = 'opgg_sync_log', _kLastOk = 'opgg_sync_last_ok';
   static const _kDone = 'opgg_tasks_done', _kDoneCol = 'opgg_notion_donecol';
   static const _kSessPages = 'opgg_session_pages';
+  static const _kReportsDs = 'opgg_notion_reports_ds', _kLogDs = 'opgg_notion_log_ds';
+  static const _kLogOn = 'opgg_notion_log_on', _kLogUntil = 'opgg_notion_log_until';
+
+  /// Copy every Protokoll entry into the Notion table "Sync-Protokoll".
+  bool get logToNotion => Prefs.getBool(_kLogOn, true);
+  set logToNotion(bool v) {
+    Prefs.setBool(_kLogOn, v);
+    // Turning it on starts from now, not with the whole local history.
+    if (v) Prefs.setInt(_kLogUntil, DateTime.now().millisecondsSinceEpoch);
+    notifyListeners();
+    if (v) syncSoon();
+  }
   Map<String, String> _sessionPages = {};
 
   /// Notion link of a logged session, once it has been uploaded.
@@ -215,9 +246,9 @@ class NotionStore extends ChangeNotifier {
       (o) => o['op'] == 'session' && o['s'] is Map && '${(o['s'] as Map)['id']}' == sessionId);
 
   String? _token;
-  String? pageId, pageTitle, tasksDs, sessionsDs;
+  String? pageId, pageTitle, tasksDs, sessionsDs, reportsDs, logDs;
   List<OTask> tasks = [];
-  List<OTask> done = []; // finished in the last ~31 days (Woche/Monat)
+  List<OTask> done = []; // finished in the last ~62 days (Woche/Monat + Monatsbericht)
   List<Map<String, dynamic>> queue = [];
   List<SyncLogEntry> log = [];
   int lastOk = 0; // epoch ms of the last successful Notion sync
@@ -249,6 +280,8 @@ class NotionStore extends ChangeNotifier {
     pageTitle = _nz(Prefs.getString(_kPageTitle, ''));
     tasksDs = _nz(Prefs.getString(_kTasksDs, ''));
     sessionsDs = _nz(Prefs.getString(_kSessDs, ''));
+    reportsDs = _nz(Prefs.getString(_kReportsDs, ''));
+    logDs = _nz(Prefs.getString(_kLogDs, ''));
     lastOk = Prefs.getInt(_kLastOk, 0);
     tasks = _list(_kTasks, OTask.fromJson);
     done = _list(_kDone, OTask.fromJson);
@@ -333,18 +366,7 @@ class NotionStore extends ChangeNotifier {
       }
       final page = pages.firstWhere((p) => p.title.trim().toUpperCase() == 'OPGG',
           orElse: () => pages.first);
-      String norm(String s) => s.replaceAll('-', '');
-      // Re-use databases OPGG already made on this page.
-      Future<String?> existing(String title) async {
-        final ds = await api.searchDataSources(title);
-        for (final d in ds) {
-          if (d.title.trim() == title &&
-              (d.parentPage == null || norm(d.parentPage!) == norm(page.id))) {
-            return d.id;
-          }
-        }
-        return null;
-      }
+      Future<String?> existing(String title) => _existing(api, page.id, title);
 
       var t = await existing(kTasksTitle);
       t ??= await api.createDatabase(page.id, kTasksTitle, '✅', tasksSchema());
@@ -368,15 +390,94 @@ class NotionStore extends ChangeNotifier {
     }
   }
 
+  /// A database OPGG already made on [page] (re-used instead of a duplicate).
+  static Future<String?> _existing(NotionApi api, String page, String title) async {
+    String norm(String s) => s.replaceAll('-', '');
+    final ds = await api.searchDataSources(title);
+    for (final d in ds) {
+      if (d.title.trim() == title &&
+          (d.parentPage == null || norm(d.parentPage!) == norm(page))) {
+        return d.id;
+      }
+    }
+    return null;
+  }
+
+  /// The extra tables (Berichte, Sync-Protokoll) are made the first time they
+  /// are needed, so connections from before Paket 4 get them too.
+  Future<String> _ensureDs(NotionApi api, String title, String emoji,
+      Map<String, Object?> schema, String prefKey) async {
+    final id = await _existing(api, pageId!, title) ??
+        await api.createDatabase(pageId!, title, emoji, schema);
+    Prefs.setString(prefKey, id);
+    return id;
+  }
+
+  /// Saves a KI report as a page in "Berichte". Returns null or a German error.
+  Future<String?> saveReport(Report r) async {
+    if (!configured || pageId == null) return 'Notion ist nicht verbunden.';
+    final api = NotionApi(_token!);
+    try {
+      reportsDs ??= await _ensureDs(api, kReportsTitle, '📝', reportsSchema(), _kReportsDs);
+      final art = r.title.split(' ').first;
+      await api.createPage(reportsDs!, {
+        'Name': NotionApi.title(r.title),
+        'Art': NotionApi.select(art),
+        'Bereich': NotionApi.select(r.kind.name.startsWith('tasks') ? 'Aufgaben' : 'Überblick'),
+        'Zeitraum': NotionApi.dayRange(r.from, r.to),
+        'Erstellt': NotionApi.date(DateTime.fromMillisecondsSinceEpoch(r.at)),
+        'Modell': NotionApi.text(r.model),
+      }, children: [
+        for (final s in r.sections) ...[
+          NotionApi.block('heading_3', s.head),
+          if (s.text.isNotEmpty) NotionApi.block('paragraph', s.text),
+          for (final p in s.points) NotionApi.block('bulleted_list_item', p),
+        ],
+      ]);
+      addLog('Notion', true, 'Bericht gespeichert: ${r.title}');
+      return null;
+    } on NotionError catch (e) {
+      addLog('Notion', false, 'Bericht speichern: ${e.human}');
+      return 'Nicht gespeichert: ${e.human}';
+    } catch (_) {
+      return 'Nicht gespeichert. Ist das Handy online?';
+    }
+  }
+
+  /// Copies new Protokoll entries to "Sync-Protokoll". Never fails the sync.
+  Future<void> _pushLog(NotionApi api) async {
+    if (!logToNotion || pageId == null) return;
+    var until = Prefs.getInt(_kLogUntil, 0);
+    if (until == 0) {
+      // First run: start from now, not with the whole local history.
+      until = DateTime.now().millisecondsSinceEpoch - 1;
+      Prefs.setInt(_kLogUntil, until);
+    }
+    final fresh = [for (final e in log.reversed) if (e.t > until) e];
+    if (fresh.isEmpty) return;
+    try {
+      logDs ??= await _ensureDs(api, kLogTitle, '🧾', logSchema(), _kLogDs);
+      for (final e in fresh.take(20)) {
+        await api.createPage(logDs!, {
+          'Name': NotionApi.title(e.msg),
+          'Quelle': NotionApi.select(e.src),
+          'Status': NotionApi.select(e.ok ? 'ok' : 'Fehler'),
+          'Zeit': NotionApi.date(DateTime.fromMillisecondsSinceEpoch(e.t)),
+        });
+        Prefs.setInt(_kLogUntil, e.t);
+      }
+    } catch (_) {/* next sync tries again */}
+  }
+
   Future<void> disconnect() async {
     await _secure.delete(key: _kToken);
     _token = null;
-    for (final k in [_kPage, _kPageTitle, _kTasksDs, _kSessDs, _kTasks, _kDone]) {
+    for (final k in [_kPage, _kPageTitle, _kTasksDs, _kSessDs, _kTasks, _kDone, _kReportsDs, _kLogDs]) {
       Prefs.setString(k, '');
     }
     Prefs.setBool(_kDoneCol, false);
     done = [];
-    pageId = pageTitle = tasksDs = sessionsDs = null;
+    pageId = pageTitle = tasksDs = sessionsDs = reportsDs = logDs = null;
     tasks = [];
     _timer?.cancel();
     addLog('Notion', true, 'Getrennt');
@@ -599,8 +700,8 @@ class NotionStore extends ChangeNotifier {
             {'property': 'Fällig', 'direction': 'ascending'},
           ]);
       tasks = [for (final r in rows) OTask.fromNotion(r)];
-      // 3. tasks finished in the last month (for Woche/Monat).
-      final since = DateTime.now().subtract(const Duration(days: 31));
+      // 3. tasks finished in the last two months (Woche/Monat, Monatsbericht).
+      final since = DateTime.now().subtract(const Duration(days: 62));
       final doneRows = await api.query(tasksDs!, filter: {
         'and': [
           {
@@ -622,6 +723,8 @@ class NotionStore extends ChangeNotifier {
         addLog('Notion', true,
             '${sent > 0 ? '$sent hochgeladen · ' : ''}${tasks.length} offene Aufgaben');
       }
+      // 4. Protokoll → Notion (after the log line above, so it goes along).
+      await _pushLog(api);
     } on NotionError catch (e) {
       lastError = e.human;
       addLog('Notion', false, e.human);

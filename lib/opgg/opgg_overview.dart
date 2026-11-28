@@ -9,6 +9,7 @@ import 'package:provider/provider.dart';
 
 import '../models/metric.dart' show baselineCountsFromNote;
 import '../state/app_state.dart';
+import 'opgg_ai.dart' show RKind, ReportPanel, ReportPen;
 import 'opgg_charts.dart';
 import 'opgg_data.dart';
 import 'opgg_style.dart';
@@ -125,6 +126,8 @@ class _OverviewTodayState extends State<OverviewToday> {
             const Text('HEUTE', style: O.label),
             const Spacer(),
             Text(wdDm(now), style: const TextStyle(fontSize: 12, color: O.ink2)),
+            const SizedBox(width: 8),
+            ReportPen(RKind.day, day: d),
           ]),
         ),
         const SizedBox(height: 10),
@@ -186,6 +189,7 @@ class _OverviewTodayState extends State<OverviewToday> {
             child: _Reasons(e: e, d: d, rmssd: rmssd, rhr: rhr, stress: stress, dayHr: dayHr),
           ),
         ),
+        const ReportPanel(RKind.day),
         const SizedBox(height: 18),
         SectionHead('Biomarker',
             trailing: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -683,7 +687,8 @@ class OverviewPeriod extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 40),
       children: [
         SectionHead(n == 7 ? 'Letzte 7 Tage' : 'Letzte 30 Tage',
-            hint: '${wdDm(days.first)} – ${wdDm(days.last)}'),
+            hint: '${wdDm(days.first)} – ${wdDm(days.last)}',
+            trailing: ReportPen(n == 7 ? RKind.week : RKind.month, day: day)),
         const SizedBox(height: 10),
         Row(children: [
           Expanded(
@@ -702,6 +707,7 @@ class OverviewPeriod extends StatelessWidget {
                   best == null ? 'noch keine Energie-Tage' : 'Energie ${energy[best]!.round()}',
                   height: 118)),
         ]),
+        ReportPanel(n == 7 ? RKind.week : RKind.month),
         const SizedBox(height: 12),
         TrendCard(
             spec: const TrendSpec('energy', 'Energie', '/100'),

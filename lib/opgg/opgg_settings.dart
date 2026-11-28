@@ -373,9 +373,9 @@ class _OpggSettingsState extends State<OpggSettings> {
                             }
                             try {
                               await cfg.save(apiKey: '');
-                              if (mounted) setState(() => (_aiMsg, _aiOk) = ('Schlüssel gelöscht.', true));
+                              if (mounted) _say('Schlüssel gelöscht.', true);
                             } catch (_) {
-                              if (mounted) setState(() => (_aiMsg, _aiOk) = ('Löschen fehlgeschlagen.', false));
+                              if (mounted) _say('Löschen fehlgeschlagen.', false);
                             }
                           })),
           ],
@@ -383,6 +383,12 @@ class _OpggSettingsState extends State<OpggSettings> {
       ]),
     );
   }
+
+  void _say(String msg, bool ok, {bool? busy}) => setState(() {
+        _aiMsg = msg;
+        _aiOk = ok;
+        if (busy != null) _aiBusy = busy;
+      });
 
   /// The key to send for [preset]: the typed one, else the stored one — but
   /// only if it belongs to the same provider (never carry a key elsewhere).
@@ -395,7 +401,7 @@ class _OpggSettingsState extends State<OpggSettings> {
   Future<void> _pickModel(CoachConfig cfg) async {
     final key = _keyFor(cfg);
     if (key == null) {
-      setState(() => (_aiMsg, _aiOk) = ('Erst den Schlüssel eintragen.', false));
+      _say('Erst den Schlüssel eintragen.', false);
       return;
     }
     setState(() {
@@ -406,7 +412,7 @@ class _OpggSettingsState extends State<OpggSettings> {
     try {
       ids = await CoachEngine.fetchModels(kAiPresets[_aiPreset].base, key);
     } catch (e) {
-      if (mounted) setState(() => (_aiBusy, _aiMsg, _aiOk) = (false, 'Modelle laden fehlgeschlagen: $e', false));
+      if (mounted) _say('Modelle laden fehlgeschlagen: $e', false, busy: false);
       return;
     }
     if (!mounted) return;
@@ -433,11 +439,11 @@ class _OpggSettingsState extends State<OpggSettings> {
     final typed = _aiKey.text.trim();
     final same = presetOf(cfg) == _aiPreset;
     if (typed.isEmpty && !(same && cfg.hasKey)) {
-      setState(() => (_aiMsg, _aiOk) = ('Bitte den Schlüssel für ${p.label} eintragen.', false));
+      _say('Bitte den Schlüssel für ${p.label} eintragen.', false);
       return;
     }
     if (_aiModel.text.trim().isEmpty) {
-      setState(() => (_aiMsg, _aiOk) = ('Bitte ein Modell wählen („Modelle“).', false));
+      _say('Bitte ein Modell wählen („Modelle“).', false);
       return;
     }
     setState(() {
@@ -457,13 +463,12 @@ class _OpggSettingsState extends State<OpggSettings> {
       final r = await CoachEngine.completeText(
           config: cfg, system: 'Antworte nur mit dem Wort OK.', user: 'Test', temperature: 0);
       if (!mounted) return;
-      setState(() => (_aiMsg, _aiOk) =
-          (r.isEmpty ? 'Gespeichert, aber leere Antwort vom Anbieter.' : 'Gespeichert · Verbindung ok.', r.isNotEmpty));
+      _say(r.isEmpty ? 'Gespeichert, aber leere Antwort vom Anbieter.' : 'Gespeichert · Verbindung ok.', r.isNotEmpty);
       NotionStore.instance.addLog('KI', true, '${p.label} verbunden (${cfg.savedModel})');
     } on CoachException catch (e) {
-      if (mounted) setState(() => (_aiMsg, _aiOk) = ('Gespeichert, Test fehlgeschlagen: ${e.message}', false));
+      if (mounted) _say('Gespeichert, Test fehlgeschlagen: ${e.message}', false);
     } catch (e) {
-      if (mounted) setState(() => (_aiMsg, _aiOk) = ('Fehlgeschlagen: $e', false));
+      if (mounted) _say('Fehlgeschlagen: $e', false);
     } finally {
       if (mounted) setState(() => _aiBusy = false);
     }

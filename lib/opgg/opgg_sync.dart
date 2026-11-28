@@ -214,6 +214,13 @@ class NotionStore extends ChangeNotifier {
   static final NotionStore instance = NotionStore._();
 
   static const _secure = FlutterSecureStorage();
+
+  /// Readable after the first unlock, like OpenStrap's KI key: iOS may start
+  /// the app in the background (band, locked phone), where an item with the
+  /// default accessibility cannot be read. That read used to look like "no
+  /// key" and the app showed Notion as disconnected (F10).
+  static const _kc = IOSOptions(accessibility: KeychainAccessibility.first_unlock);
+  static const _kKcUpgraded = 'opgg_notion_kc_first_unlock';
   static const _kToken = 'opgg_notion_token';
   static const _kPage = 'opgg_notion_page', _kPageTitle = 'opgg_notion_page_title';
   static const _kTasksDs = 'opgg_notion_tasks_ds', _kSessDs = 'opgg_notion_sessions_ds';
@@ -300,11 +307,33 @@ class NotionStore extends ChangeNotifier {
     } catch (_) {
       queue = [];
     }
-    unawaited(_secure.read(key: _kToken).then((v) {
-      _token = (v == null || v.isEmpty) ? null : v;
-      notifyListeners();
-      _start();
-    }, onError: (_) {}));
+    unawaited(_readToken());
+  }
+
+  /// Reads the Notion key. A failed or empty read while a connection is on
+  /// record is retried on the next resume instead of counting as "gone".
+  Future<void> _readToken() async {
+    try {
+      final v = await _secure.read(key: _kToken, iOptions: _kc);
+      if (v != null && v.isNotEmpty) {
+        _token = v;
+        // Items written before b17 keep the old accessibility until rewritten.
+        if (!Prefs.getBool(_kKcUpgraded, false)) {
+          await _secure.write(key: _kToken, value: v, iOptions: _kc);
+          Prefs.setBool(_kKcUpgraded, true);
+        }
+      }
+    } catch (_) {/* locked keychain: retried on resume */}
+    notifyListeners();
+    _start();
+  }
+
+  void _onResume() {
+    if (_token == null && pageId != null) {
+      unawaited(_readToken());
+    } else {
+      syncSoon();
+    }
   }
 
   static String? _nz(String s) => s.isEmpty ? null : s;
@@ -323,8 +352,8 @@ class NotionStore extends ChangeNotifier {
   }
 
   void _start() {
+    _life ??= AppLifecycleListener(onResume: _onResume);
     _timer?.cancel();
-    _life ??= AppLifecycleListener(onResume: () => syncSoon());
     if (!configured) return;
     _timer = Timer.periodic(const Duration(minutes: 15), (_) => sync());
     syncSoon();
@@ -356,7 +385,8 @@ class NotionStore extends ChangeNotifier {
     } on NotionError catch (e) {
       return e.human;
     }
-    await _secure.write(key: _kToken, value: token.trim());
+    await _secure.write(key: _kToken, value: token.trim(), iOptions: _kc);
+    Prefs.setBool(_kKcUpgraded, true);
     _token = token.trim();
     try {
       final pages = await api.searchPages('OPGG');
@@ -470,7 +500,7 @@ class NotionStore extends ChangeNotifier {
   }
 
   Future<void> disconnect() async {
-    await _secure.delete(key: _kToken);
+    await _secure.delete(key: _kToken, iOptions: _kc);
     _token = null;
     for (final k in [_kPage, _kPageTitle, _kTasksDs, _kSessDs, _kTasks, _kDone, _kReportsDs, _kLogDs]) {
       Prefs.setString(k, '');

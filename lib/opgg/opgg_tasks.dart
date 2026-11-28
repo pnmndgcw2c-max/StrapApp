@@ -2,12 +2,14 @@
 // orange. Tap a task to start it in Fokus, finish it, or open it in Notion.
 // New tasks are written straight to Notion (the store).
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'opgg_charts.dart';
-import 'opgg_focus.dart' show FocusStore;
+import 'opgg_focus.dart' show FPhase, FocusStore, finishFocus;
 import 'opgg_style.dart';
 import 'opgg_sync.dart';
 import 'opgg_toast.dart';
@@ -59,17 +61,53 @@ String dueLabel(DateTime d) {
   return wdDm(d);
 }
 
-class TasksPage extends StatelessWidget {
+/// Effort points and rough minutes (shared with the stats below).
+int effortPoints(String? e) => switch (e) { 'kurz' => 1, 'lang' => 3, _ => 2 };
+int effortMinutes(String? e) => switch (e) { 'kurz' => 20, 'lang' => 150, _ => 60 };
+
+/// Highest task energy that fits today's energy (null = unknown → all fit).
+int? energyCap(double? energy) => energy == null ? null : kEnergies.indexOf(wantedLevel(energy)!);
+
+bool _sameDay(DateTime a, DateTime b) => a.year == b.year && a.month == b.month && a.day == b.day;
+
+class TasksPage extends StatefulWidget {
   final double? energy;
   final void Function(OTask) onStart;
-  final VoidCallback onSettings;
-  const TasksPage({super.key, this.energy, required this.onStart, required this.onSettings});
+  final VoidCallback onSettings, onFocus;
+  const TasksPage(
+      {super.key,
+      this.energy,
+      required this.onStart,
+      required this.onSettings,
+      required this.onFocus});
+  @override
+  State<TasksPage> createState() => _TasksPageState();
+}
+
+class _TasksPageState extends State<TasksPage> {
+  bool _fit = true; // "Passt jetzt" vs "Alle"
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && FocusStore.instance.phase != FPhase.idle) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final n = NotionStore.instance;
+    final f = FocusStore.instance;
     return ListenableBuilder(
-      listenable: n,
+      listenable: Listenable.merge([n, f]),
       builder: (context, _) {
         if (!n.configured) {
           return Center(
@@ -85,43 +123,96 @@ class TasksPage extends StatelessWidget {
                     'dann legt OPGG die Tabellen selbst an.',
                     textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: O.ink3)),
                 const SizedBox(height: 18),
-                SizedBox(width: 240, child: OButton('Einrichten', onTap: onSettings, height: 46)),
+                SizedBox(width: 240, child: OButton('Einrichten', onTap: widget.onSettings, height: 46)),
               ]),
             ),
           );
         }
-        final list = suggest(n.tasks, energy);
-        final want = wantedLevel(energy);
+        final now = DateTime.now();
+        final cap = energyCap(widget.energy);
+        final open = suggest(n.tasks, widget.energy);
+        final doneToday = [for (final t in n.done) if (t.doneAt != null && _sameDay(t.doneAt!, now)) t];
+        bool fits(OTask t) => cap == null || (t.energy == null ? 1 : kEnergies.indexOf(t.energy!)) <= cap;
+        final shown = [
+          for (final t in open) if (!_fit || fits(t)) t,
+          ...doneToday,
+        ];
+        final openMin = open.fold<int>(0, (a, t) => a + effortMinutes(t.effort));
+        final points = doneToday.fold<int>(0, (a, t) => a + effortPoints(t.effort));
+        final running = f.phase != FPhase.idle && f.taskId != null
+            ? (open.where((t) => t.id == f.taskId).firstOrNull)
+            : null;
+
         return ListView(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 100),
-            children: [
-              SectionHead('Offen',
-                  hint: want == null
-                      ? '${list.length} Aufgaben'
-                      : 'passend zu Energie: $want zuerst'),
-              const SizedBox(height: 10),
-              if (list.isEmpty)
-                Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: tileDeco(),
-                  child: const Text('Keine offenen Aufgaben. Mit + neue anlegen.', style: O.small),
-                )
-              else
-                Container(
-                  decoration: tileDeco(),
-                  child: Column(children: [
-                    for (var i = 0; i < list.length; i++) ...[
-                      if (i > 0) const Divider(height: 1, thickness: 1, color: O.line, indent: 14),
-                      TaskRow(list[i], onTap: () => _actions(context, list[i])),
-                    ],
-                  ]),
-                ),
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 100),
+          children: [
+            Seg(
+                labels: const ['Passt jetzt', 'Alle'],
+                index: _fit ? 0 : 1,
+                onPick: (i) => setState(() => _fit = i == 0),
+                height: 40),
+            const SizedBox(height: 16),
+            Row(children: [
+              Expanded(child: _Tile('Offen', '${open.length}', '~${hMin(openMin)} Aufwand')),
+              const SizedBox(width: 12),
+              Expanded(child: _Tile('Heute erledigt', '${doneToday.length}', '$points Aufwandspunkte')),
+            ]),
+            if (running != null) ...[
               const SizedBox(height: 16),
-              OButton('+ Neue Aufgabe', primary: false, height: 48, onTap: () => _add(context)),
+              _RunCard(task: running, onFocus: widget.onFocus),
             ],
+            const SizedBox(height: 16),
+            Row(children: [
+              Text(
+                  _fit
+                      ? (widget.energy == null
+                          ? 'PASST JETZT · ENERGIE NOCH UNBEKANNT'
+                          : 'PASST ZU ENERGIE ${widget.energy!.round()}')
+                      : 'ALLE AUFGABEN',
+                  style: O.label),
+              const Spacer(),
+              const Text('aus Notion', style: O.small),
+            ]),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+              decoration: tileDeco(),
+              child: shown.isEmpty
+                  ? const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 14),
+                      child: Text('Keine passenden Aufgaben. Mit + neue anlegen.', style: O.small),
+                    )
+                  : Column(children: [
+                      for (var i = 0; i < shown.length; i++)
+                        TaskRow(
+                          shown[i],
+                          first: i == 0,
+                          done: doneToday.contains(shown[i]),
+                          dim: !fits(shown[i]),
+                          running: running?.id == shown[i].id,
+                          onToggle: () => _toggle(shown[i], doneToday.contains(shown[i])),
+                          onTap: () => _actions(context, shown[i]),
+                        ),
+                    ]),
+            ),
+            const SizedBox(height: 16),
+            OButton('+ Neue Aufgabe', primary: false, height: 48, onTap: () => _add(context)),
+          ],
         );
       },
     );
+  }
+
+  void _toggle(OTask t, bool isDone) {
+    HapticFeedback.selectionClick();
+    final n = NotionStore.instance;
+    if (isDone) {
+      n.reopenTask(t);
+      return;
+    }
+    final lists = n.snapshot();
+    final uid = n.completeTask(t);
+    OToast.instance.show('In Notion abgehakt', undo: () => n.undo(uid, lists));
   }
 
   Future<void> _actions(BuildContext context, OTask t) async {
@@ -164,7 +255,7 @@ class TasksPage extends StatelessWidget {
     );
     switch (r) {
       case 'start':
-        onStart(t);
+        widget.onStart(t);
       case 'done':
         final n = NotionStore.instance;
         final lists = n.snapshot();
@@ -189,63 +280,196 @@ class TasksPage extends StatelessWidget {
   }
 }
 
+/// Task row (mockup): checkbox, title, meta, effort dots + level + tracked
+/// time, progress bar. Tapping the row opens the actions.
 class TaskRow extends StatelessWidget {
   final OTask t;
-  final VoidCallback? onTap;
-  const TaskRow(this.t, {super.key, this.onTap});
+  final bool first, done, dim, running;
+  final VoidCallback onToggle, onTap;
+  const TaskRow(this.t,
+      {super.key,
+      required this.first,
+      required this.done,
+      required this.dim,
+      required this.running,
+      required this.onToggle,
+      required this.onTap});
+
   @override
   Widget build(BuildContext context) {
-    final overdue = t.due != null && dueLabel(t.due!) == 'überfällig';
+    final pts = effortPoints(t.effort);
+    final prog = done ? 100 : t.progress;
+    final overdue = !done && t.due != null && dueLabel(t.due!) == 'überfällig';
+    final meta = [
+      t.area ?? 'Aufgabe',
+      if (t.due != null) 'fällig ${dueLabel(t.due!)}',
+      '~${hMin(effortMinutes(t.effort))}',
+    ].join(' · ');
+    final tracked = [
+      if (prog > 0 && !done) '$prog %',
+      if (t.focusMin > 0) '${hMin(t.focusMin)} getrackt',
+    ].join(' · ');
     return InkWell(
       onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 11, 14, 11),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: first ? null : const BoxDecoration(border: Border(top: BorderSide(color: O.line))),
         child: Row(children: [
-          _EnergyBars(t.energy),
-          const SizedBox(width: 12),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: onToggle,
+            child: SizedBox(
+              width: 32,
+              height: 44,
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  width: 20,
+                  height: 20,
+                  decoration: BoxDecoration(
+                    color: done ? O.ink : null,
+                    border: done ? null : Border.all(color: O.ink3, width: 1.5),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: done ? const Icon(Icons.check, size: 14, color: O.bg) : null,
+                ),
+              ),
+            ),
+          ),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(t.name, style: O.body, maxLines: 2, overflow: TextOverflow.ellipsis),
-              const SizedBox(height: 2),
-              Text(
-                  [
-                    if (t.effort != null) t.effort!,
-                    if (t.area != null) t.area!,
-                    if (t.progress > 0) '${t.progress} %',
-                  ].join(' · '),
-                  style: O.small),
+              Row(children: [
+                Expanded(
+                  child: Text(t.name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: done ? const Color(0xFF6E6E73) : (dim ? const Color(0xFFA1A1A6) : O.ink),
+                          decoration: done ? TextDecoration.lineThrough : null)),
+                ),
+                if (running) ...[const SizedBox(width: 8), const Dot(O.green)],
+                if (!running && t.started && !done) ...[const SizedBox(width: 8), const Dot(O.orange)],
+              ]),
+              const SizedBox(height: 4),
+              Text(meta, style: TextStyle(fontSize: 12, color: overdue ? O.red : O.ink3)),
+              const SizedBox(height: 4),
+              Row(children: [
+                for (var k = 1; k <= 3; k++)
+                  Container(
+                    width: 6,
+                    height: 6,
+                    margin: const EdgeInsets.only(right: 3),
+                    decoration: BoxDecoration(
+                        color: k <= pts ? O.ink : const Color(0xFF46464B), shape: BoxShape.circle),
+                  ),
+                const SizedBox(width: 5),
+                if (t.energy != null)
+                  Text(t.energy!.toUpperCase(),
+                      style: const TextStyle(
+                          fontSize: 11, fontWeight: FontWeight.w600, letterSpacing: .5, color: O.ink2)),
+                if (tracked.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(tracked,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 11, color: O.ink3, fontFeatures: O.tabular)),
+                  ),
+                ],
+              ]),
+              if (prog > 0 && !done) ...[
+                const SizedBox(height: 6),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(999),
+                  child: LinearProgressIndicator(
+                    value: prog / 100,
+                    minHeight: 4,
+                    backgroundColor: O.raised,
+                    valueColor: const AlwaysStoppedAnimation(O.ink),
+                  ),
+                ),
+              ],
             ]),
           ),
-          if (t.due != null)
-            Padding(
-              padding: const EdgeInsets.only(left: 8),
-              child: Text(dueLabel(t.due!),
-                  style: TextStyle(fontSize: 12, color: overdue ? O.red : O.ink3)),
-            ),
-          if (t.started) ...[const SizedBox(width: 8), const Dot(O.orange)],
         ]),
       ),
     );
   }
 }
 
-/// Three small bars: how much energy the task needs.
-class _EnergyBars extends StatelessWidget {
-  final String? energy;
-  const _EnergyBars(this.energy);
+class _Tile extends StatelessWidget {
+  final String label, value, sub;
+  const _Tile(this.label, this.value, this.sub);
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        decoration: tileDeco(),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(label, style: O.small),
+          const SizedBox(height: 4),
+          Text(value,
+              style: const TextStyle(
+                  fontSize: 22, fontWeight: FontWeight.w500, color: O.ink, fontFeatures: O.tabular)),
+          const SizedBox(height: 4),
+          Text(sub, style: O.small),
+        ]),
+      );
+}
+
+/// The task currently in focus (mockup): state, total tracked time,
+/// "Zum Fokus" and "Beenden" (asks for the progress).
+class _RunCard extends StatelessWidget {
+  final OTask task;
+  final VoidCallback onFocus;
+  const _RunCard({required this.task, required this.onFocus});
   @override
   Widget build(BuildContext context) {
-    final n = energy == null ? 0 : kEnergies.indexOf(energy!) + 1;
-    return Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-      for (var i = 0; i < 3; i++)
-        Container(
-          width: 4,
-          height: 7.0 + i * 4,
-          margin: const EdgeInsets.only(right: 2),
-          decoration: BoxDecoration(
-              color: i < n ? O.ink : O.raised, borderRadius: BorderRadius.circular(2)),
-        ),
-    ]);
+    final f = FocusStore.instance;
+    final paused = f.phase == FPhase.paused;
+    final totalS = task.focusMin * 60 + f.studied ~/ 1000;
+    final clock = '${pad2(totalS ~/ 3600)}:${pad2(totalS % 3600 ~/ 60)}:${pad2(totalS % 60)}';
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
+      decoration: wellDeco(),
+      child: Column(children: [
+        Row(children: [
+          Container(
+            height: 28,
+            padding: const EdgeInsets.symmetric(horizontal: 11),
+            decoration: BoxDecoration(color: O.pill, borderRadius: BorderRadius.circular(999)),
+            child: Row(children: [
+              Dot(paused ? O.orange : O.green),
+              const SizedBox(width: 7),
+              Text(paused ? 'Pause' : 'Im Fokus',
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: O.ink2)),
+            ]),
+          ),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Text(task.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 13, color: O.ink2)),
+          ),
+        ]),
+        const SizedBox(height: 8),
+        Text(clock,
+            style: const TextStyle(
+                fontSize: 44, fontWeight: FontWeight.w300, height: 1, color: O.ink, fontFeatures: O.tabular)),
+        const SizedBox(height: 8),
+        Text(
+            '${paused ? 'Pause' : 'Im Fokus'} · '
+            '${task.progress > 0 ? '${task.progress} % · ' : ''}geschätzt ~${hMin(effortMinutes(task.effort))}',
+            style: O.small),
+        const SizedBox(height: 12),
+        Row(children: [
+          Expanded(child: OButton('Zum Fokus', primary: false, height: 48, onTap: onFocus)),
+          const SizedBox(width: 10),
+          Expanded(child: OButton('Beenden', height: 48, onTap: () => finishFocus(context))),
+        ]),
+      ]),
+    );
   }
 }
 
@@ -383,9 +607,6 @@ class _AddTaskState extends State<_AddTask> {
 
 // ── Woche / Monat ─────────────────────────────────────────────────────────────
 
-/// Effort points per task, and the minutes each effort roughly means.
-const _points = {'kurz': 1, 'mittel': 2, 'lang': 3};
-const _estMin = {'kurz': 20, 'mittel': 60, 'lang': 150};
 
 class TasksPeriod extends StatelessWidget {
   final int n;
@@ -415,7 +636,7 @@ class TasksPeriod extends StatelessWidget {
                 }(),
             ];
         final count = perDay((l) => l.length.toDouble());
-        final points = perDay((l) => l.fold<double>(0, (a, t) => a + (_points[t.effort] ?? 0)));
+        final points = perDay((l) => l.fold<double>(0, (a, t) => a + effortPoints(t.effort)));
         final hours = [
           for (final d in days)
             () {
@@ -430,7 +651,7 @@ class TasksPeriod extends StatelessWidget {
         final pts = points.whereType<double>().fold<double>(0, (a, b) => a + b);
         // Estimate vs real: only finished tasks with an effort and tracked time.
         final rated = [for (final t in done) if (t.effort != null && t.focusMin > 0) t];
-        final est = rated.fold<int>(0, (a, t) => a + (_estMin[t.effort] ?? 0));
+        final est = rated.fold<int>(0, (a, t) => a + effortMinutes(t.effort));
         final real = rated.fold<int>(0, (a, t) => a + t.focusMin);
         final dev = est == 0 ? null : ((real - est) / est * 100).round();
 

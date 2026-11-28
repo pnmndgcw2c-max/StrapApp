@@ -327,7 +327,10 @@ class _OpggShellState extends State<OpggShell> {
       case OTab.tasks:
         final Widget today = switch (_tab) {
           OTab.tasks => TasksPage(
-              energy: Energy.of(d).total, onStart: _startTask, onSettings: _settings),
+              energy: Energy.of(d).total,
+              onStart: _startTask,
+              onSettings: _settings,
+              onFocus: () => _go(OTab.focus)),
           OTab.overview =>
             OverviewToday(day: d, onStart: _startTask, onTasks: () => _go(OTab.tasks)),
           OTab.sleep => SleepToday(

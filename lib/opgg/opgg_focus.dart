@@ -679,7 +679,14 @@ class _FocusTodayState extends State<FocusToday> {
     if (t != null) f.setTitle(t);
   }
 
-  Future<void> _finish(BuildContext context) async {
+  Future<void> _finish(BuildContext context) => finishFocus(context);
+}
+
+/// Ends the running session (from Fokus or the Aufgaben card): a linked task
+/// asks for its progress, then the session is logged with a Rückgängig toast.
+Future<void> finishFocus(BuildContext context) async {
+    final f = FocusStore.instance;
+    if (f.phase == FPhase.idle) return;
     HapticFeedback.mediumImpact();
     final n = NotionStore.instance;
     final task = f.taskId == null ? null : n.tasks.where((t) => t.id == f.taskId).firstOrNull;
@@ -718,7 +725,6 @@ class _FocusTodayState extends State<FocusToday> {
     } else {
       OToast.instance.show('Unter 1 Minute – nicht gespeichert');
     }
-  }
 }
 
 /// Session end (mockup): progress slider in 5 % steps, quick chips, the

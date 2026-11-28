@@ -531,6 +531,30 @@ class NotionStore extends ChangeNotifier {
     return uid;
   }
 
+  /// Takes a finished task back into the open list (checkbox un-ticked).
+  void reopenTask(OTask t) {
+    final p = t.progress >= 100 ? 0 : t.progress;
+    _enqueue({'op': 'reopen', 'id': t.id, 'p': p});
+    done = [for (final x in done) if (x.id != t.id) x];
+    tasks = [
+      ...tasks,
+      OTask(
+          id: t.id,
+          name: t.name,
+          status: p > 0 ? kStatusDoing : kStatusOpen,
+          energy: t.energy,
+          effort: t.effort,
+          area: t.area,
+          url: t.url,
+          due: t.due,
+          progress: p,
+          focusMin: t.focusMin),
+    ];
+    _saveTasks();
+    notifyListeners();
+    syncSoon();
+  }
+
   // ── sync ──
 
   Future<void> sync({bool manual = false}) async {
@@ -647,6 +671,13 @@ class NotionStore extends ChangeNotifier {
           'Status': NotionApi.select(kStatusDone),
           'Fortschritt': NotionApi.number(1),
           'Erledigt am': NotionApi.dateOnly(DateTime.now()),
+        });
+      case 'reopen':
+        final p = (op['p'] as num?)?.toInt() ?? 0;
+        await api.updatePage('${op['id']}', {
+          'Status': NotionApi.select(p > 0 ? kStatusDoing : kStatusOpen),
+          'Fortschritt': NotionApi.number(p / 100),
+          'Erledigt am': NotionApi.dateOnly(null),
         });
       case 'progress':
         final p = (op['p'] as num).toInt();
